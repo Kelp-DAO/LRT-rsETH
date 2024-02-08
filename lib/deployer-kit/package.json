@@ -1,0 +1,8 @@
+{
+    "name": "deployer-kit",
+    "version": "0.2.0",
+    "description": "The deployer template script is a tool to streamline the deployment of contracts between scripts and unit tests",
+    "main": "index.js",
+    "author": "Polygon Labs",
+    "license": "(Apache-2.0 OR MIT)"
+}

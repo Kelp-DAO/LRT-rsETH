@@ -1,0 +1,21 @@
+# directories
+broadcast
+cache
+cache_forge
+coverage
+lib
+node_modules
+out
+.vscode
+.solhint.json
+
+# files
+*.env
+*.log
+.DS_Store
+lcov.info
+package-lock.json
+yarn.lock
+
+# readme files
+*.md

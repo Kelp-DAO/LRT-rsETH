@@ -1,0 +1,29 @@
+{
+  "name": "lrt",
+  "scripts": {
+    "clean": "rm -rf cache out",
+    "build": "forge build",
+    "lint": "npm run lint:sol && npm run prettier:check",
+    "lint:sol": "forge fmt --check && solhint {script,src,test}/**/*.sol",
+    "prettier:check": "prettier --check **/*.{json,md,yml} --ignore-path=.prettierignore",
+    "prettier:write": "prettier --write **/*.{json,md,yml} --ignore-path=.prettierignore",
+    "test": "forge test",
+    "test:coverage": "forge coverage",
+    "test:coverage:report": "forge coverage --report lcov && genhtml lcov.info --branch-coverage --output-dir coverage",
+    "metrics": "npx solidity-code-metrics contracts/*.sol contracts/**/*.sol > metrics.md",
+    "upgrade:mainnet": "npx hardhat run script/hardhat-scripts/upgrade.ts --network mainnet",
+    "upgrade:goerli": "npx hardhat run script/hardhat-scripts/upgrade.ts --network goerli"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-foundry": "^1.1.1",
+    "@nomicfoundation/hardhat-toolbox": "^3.0.0",
+    "@openzeppelin/hardhat-upgrades": "^2.3.3",
+    "hardhat": "^2.18.3",
+    "prettier": "^3.0.3",
+    "solidity-code-metrics": "^0.0.25"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "solhint": "^4.0.0"
+  }
+}
