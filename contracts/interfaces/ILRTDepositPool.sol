@@ -12,6 +12,7 @@ interface ILRTDepositPool {
     error MinimumAmountToReceiveNotMet();
     error NodeDelegatorNotFound();
     error NodeDelegatorHasAssetBalance(address assetAddress, uint256 assetBalance);
+    error NodeDelegatorHasETHInEigenlayer();
 
     //events
     event MaxNodeDelegatorLimitUpdated(uint256 maxNodeDelegatorLimit);
@@ -26,9 +27,7 @@ interface ILRTDepositPool {
     );
     event ETHDeposit(address indexed depositor, uint256 depositAmount, uint256 rsethMintAmount, string referralId);
     event MinAmountToDepositUpdated(uint256 minAmountToDeposit);
-    event AssetSwapped(
-        address indexed fromAsset, address indexed toAsset, uint256 fromAssetAmount, uint256 toAssetAmount
-    );
+    event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
 
     function depositAsset(
         address asset,

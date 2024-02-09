@@ -682,28 +682,6 @@ contract LRTIntegrationTest is Test {
         assertFalse(rseth.paused(), "Contract is not unpaused");
     }
 
-    function test_RevertWhenCallingUpdateLRTConfigAndCallerIsNotLRTAdmin() external {
-        vm.expectRevert(ILRTConfig.CallerNotLRTConfigAdmin.selector);
-        rseth.updateLRTConfig(address(lrtConfig));
-    }
-
-    function test_RevertWhenCallingUpdateLRTConfigAndLRTConfigIsZeroAddress() external {
-        vm.startPrank(admin);
-        vm.expectRevert(UtilLib.ZeroAddressNotAllowed.selector);
-        rseth.updateLRTConfig(address(0));
-        vm.stopPrank();
-    }
-
-    function test_UpdateLRTConfigWhenCallingUpdateLRTConfig() external {
-        address newLRTConfigAddress = makeAddr("MockNewLRTConfig");
-        ILRTConfig newLRTConfig = ILRTConfig(newLRTConfigAddress);
-
-        vm.prank(admin);
-        rseth.updateLRTConfig(address(newLRTConfig));
-
-        assertEq(address(newLRTConfig), address(rseth.lrtConfig()), "LRT config address is not set");
-    }
-
     function test_NodeDelegatorIsAlreadyInitialized() public {
         // attempt to initialize NodeDelegator again reverts
         vm.expectRevert("Initializable: contract is already initialized");

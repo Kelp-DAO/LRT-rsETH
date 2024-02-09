@@ -83,16 +83,9 @@ contract LRTOracle is ILRTOracle, LRTConfigRoleChecker, Initializable {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev add/update the price oracle of any supported asset
-    /// @dev only LRTManager is allowed
+    /// @dev only onlyLRTAdmin is allowed
     /// @param asset asset address for which oracle price needs to be added/updated
-    function updatePriceOracleFor(
-        address asset,
-        address priceOracle
-    )
-        external
-        onlyLRTManager
-        onlySupportedAsset(asset)
-    {
+    function updatePriceOracleFor(address asset, address priceOracle) external onlyLRTAdmin onlySupportedAsset(asset) {
         UtilLib.checkNonZeroAddress(priceOracle);
         assetPriceOracle[asset] = priceOracle;
         emit AssetPriceOracleUpdate(asset, priceOracle);

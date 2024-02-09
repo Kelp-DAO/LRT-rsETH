@@ -56,14 +56,13 @@ contract LRTNativeEthStakingIntegrationTest is Test {
         vm.stopPrank();
 
         // Add eth as supported asset
-        vm.startPrank(manager);
+        vm.prank(admin);
         lrtConfig.addNewSupportedAsset(LRTConstants.ETH_TOKEN, 100_000 ether);
 
         // add oracle for ETH
         address oneETHOracle = address(new OneETHPriceOracle());
+        vm.prank(manager);
         lrtOracle.updatePriceOracleFor(LRTConstants.ETH_TOKEN, oneETHOracle);
-
-        vm.stopPrank();
     }
 
     function setUp() public {

@@ -250,7 +250,43 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     /// @dev only callable by LRT admin
     /// @param nodeDelegatorAddress NodeDelegator contract address
     function removeNodeDelegatorContractFromQueue(address nodeDelegatorAddress) public onlyLRTAdmin {
-        // revert if node delegator contract has assets lying in it or it has asset in eigenlayer asset strategies
+        // 1. remove assets from node delegator contract to LRTDepositPool
+        address[] memory supportedAssets = lrtConfig.getSupportedAssetList();
+
+        uint256 supportedAssetsLength = supportedAssets.length;
+
+        for (uint256 i; i < supportedAssetsLength;) {
+            // check the case for ETH
+            if (supportedAssets[i] == LRTConstants.ETH_TOKEN) {
+                uint256 ethBalance = nodeDelegatorAddress.balance;
+                if (ethBalance > 0) {
+                    INodeDelegator(nodeDelegatorAddress).sendETHFromDepositPoolToNDC{ value: ethBalance }();
+                }
+            } else {
+                // LST case
+                uint256 assetBalance = IERC20(supportedAssets[i]).balanceOf(nodeDelegatorAddress);
+
+                if (assetBalance > 0) {
+                    INodeDelegator(nodeDelegatorAddress).transferBackToLRTDepositPool(supportedAssets[i], assetBalance);
+                }
+            }
+
+            unchecked {
+                ++i;
+            }
+        }
+
+        // 2. revert if node delegator contract has asset in eigenlayer asset strategies
+
+        // check if NDC has native ETH balance in eigen layer
+        if (
+            INodeDelegator(nodeDelegatorAddress).stakedButUnverifiedNativeETH() > 0
+                || INodeDelegator(nodeDelegatorAddress).getETHEigenPodBalance() > 0
+        ) {
+            revert NodeDelegatorHasETHInEigenlayer();
+        }
+
+        // check if NDC has LST balance in eigen layer
         (address[] memory assets, uint256[] memory assetBalances) =
             INodeDelegator(nodeDelegatorAddress).getAssetBalances();
 
@@ -269,6 +305,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
             }
         }
 
+        // 3. remove node delegator contract from queue
         uint256 length = nodeDelegatorQueue.length;
         uint256 ndcIndex;
 
@@ -287,7 +324,9 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
             }
         }
 
-        // remove node delegator contract from queue
+        // remove from isNodeDelegator mapping
+        isNodeDelegator[nodeDelegatorAddress] = 0;
+        // remove from nodeDelegatorQueue
         nodeDelegatorQueue[ndcIndex] = nodeDelegatorQueue[length - 1];
         nodeDelegatorQueue.pop();
 
@@ -338,48 +377,42 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         INodeDelegator(nodeDelegator).sendETHFromDepositPoolToNDC{ value: amount }();
     }
 
-    /// @notice swap assets that are accepted by LRTDepositPool
-    /// @dev use LRTOracle to get price for fromToken to toToken. Only callable by LRT manager
-    /// @param fromAsset Asset address to swap from
+    /// @notice swap ETH for LST asset which is accepted by LRTDepositPool
+    /// @dev use LRTOracle to get price for toToken. Only callable by LRT manager
     /// @param toAsset Asset address to swap to
-    /// @param fromAssetAmount Asset amount to swap from
     /// @param minToAssetAmount Minimum asset amount to swap to
-
-    function swapAssetWithinDepositPool(
-        address fromAsset,
+    function swapETHForAssetWithinDepositPool(
         address toAsset,
-        uint256 fromAssetAmount,
         uint256 minToAssetAmount
     )
         external
+        payable
         onlyLRTManager
-        onlySupportedAsset(fromAsset)
         onlySupportedAsset(toAsset)
     {
         // checks
-        uint256 toAssetAmount = getSwapAssetReturnAmount(fromAsset, toAsset, fromAssetAmount);
-        if (toAssetAmount < minToAssetAmount || IERC20(toAsset).balanceOf(address(this)) < toAssetAmount) {
+        uint256 ethAmountSent = msg.value;
+
+        uint256 returnAmount = getSwapETHToAssetReturnAmount(toAsset, ethAmountSent);
+
+        if (returnAmount < minToAssetAmount || IERC20(toAsset).balanceOf(address(this)) < returnAmount) {
             revert NotEnoughAssetToTransfer();
         }
 
         // interactions
-        IERC20(fromAsset).transferFrom(msg.sender, address(this), fromAssetAmount);
+        IERC20(toAsset).transfer(msg.sender, returnAmount);
 
-        IERC20(toAsset).transfer(msg.sender, toAssetAmount);
-
-        emit AssetSwapped(fromAsset, toAsset, fromAssetAmount, toAssetAmount);
+        emit ETHSwappedForLST(ethAmountSent, toAsset, returnAmount);
     }
 
-    /// @notice get return amount for swapping assets that are accepted by LRTDepositPool
-    /// @dev use LRTOracle to get price for fromToken to toToken
-    /// @param fromAsset Asset address to swap from
+    /// @notice get return amount for swapping ETH to asset that is accepted by LRTDepositPool
+    /// @dev use LRTOracle to get price for toToken
     /// @param toAsset Asset address to swap to
-    /// @param fromAssetAmount Asset amount to swap from
+    /// @param ethAmountToSend Eth amount to swap from
     /// @return returnAmount Return amount of toAsset
-    function getSwapAssetReturnAmount(
-        address fromAsset,
+    function getSwapETHToAssetReturnAmount(
         address toAsset,
-        uint256 fromAssetAmount
+        uint256 ethAmountToSend
     )
         public
         view
@@ -388,7 +421,9 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
         ILRTOracle lrtOracle = ILRTOracle(lrtOracleAddress);
 
-        return lrtOracle.getAssetPrice(fromAsset) * fromAssetAmount / lrtOracle.getAssetPrice(toAsset);
+        uint256 ethPricePerUint = 1e18;
+
+        return ethPricePerUint * ethAmountToSend / lrtOracle.getAssetPrice(toAsset);
     }
 
     /// @notice update max node delegator count

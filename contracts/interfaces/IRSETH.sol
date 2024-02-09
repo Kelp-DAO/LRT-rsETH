@@ -11,6 +11,4 @@ interface IRSETH is IERC20 {
     function pause() external;
 
     function unpause() external;
-
-    function updateLRTConfig(address _lrtConfig) external;
 }

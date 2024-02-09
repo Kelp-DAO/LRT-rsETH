@@ -54,13 +54,4 @@ contract RSETH is Initializable, LRTConfigRoleChecker, ERC20Upgradeable, Pausabl
     function unpause() external onlyLRTAdmin {
         _unpause();
     }
-
-    /// @notice Updates the LRT config contract
-    /// @dev only callable by the rsETH admin
-    /// @param _lrtConfig the new LRT config contract
-    function updateLRTConfig(address _lrtConfig) external override onlyLRTAdmin {
-        UtilLib.checkNonZeroAddress(_lrtConfig);
-        lrtConfig = ILRTConfig(_lrtConfig);
-        emit UpdatedLRTConfig(_lrtConfig);
-    }
 }

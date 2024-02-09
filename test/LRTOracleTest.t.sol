@@ -99,23 +99,23 @@ contract LRTOracleSetPriceOracle is LRTOracleTest {
         priceOracle = new MockPriceOracle();
     }
 
-    function test_RevertWhenCallerIsNotLRTManager() external {
+    function test_RevertWhenCallerIsNotLRTAdmin() external {
         vm.startPrank(alice);
-        vm.expectRevert(ILRTConfig.CallerNotLRTConfigManager.selector);
+        vm.expectRevert(ILRTConfig.CallerNotLRTConfigAdmin.selector);
         lrtOracle.updatePriceOracleFor(address(ethX), address(priceOracle));
         vm.stopPrank();
     }
 
     function test_RevertWhenAssetIsNotSupported() external {
         address randomAddress = address(0x123);
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         vm.expectRevert(ILRTConfig.AssetNotSupported.selector);
         lrtOracle.updatePriceOracleFor(randomAddress, address(priceOracle));
         vm.stopPrank();
     }
 
     function test_RevertWhenPriceOracleIsZero() external {
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         vm.expectRevert(UtilLib.ZeroAddressNotAllowed.selector);
         lrtOracle.updatePriceOracleFor(address(ethX), address(0));
         vm.stopPrank();
@@ -124,7 +124,7 @@ contract LRTOracleSetPriceOracle is LRTOracleTest {
     function test_SetAssetPriceFeed() external {
         assertEq(lrtOracle.assetPriceOracle(address(ethX)), address(0));
 
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         expectEmit();
         emit AssetPriceOracleUpdate(address(ethX), address(priceOracle));
         lrtOracle.updatePriceOracleFor(address(ethX), address(priceOracle));
@@ -142,7 +142,7 @@ contract LRTOracleFetchAssetPrice is LRTOracleTest {
         lrtOracle.initialize(address(lrtConfig));
         priceOracle = new MockPriceOracle();
 
-        vm.prank(manager);
+        vm.prank(admin);
         lrtOracle.updatePriceOracleFor(address(ethX), address(priceOracle));
     }
 
@@ -167,7 +167,7 @@ contract LRTOracleFetchRSETHPrice is LRTOracleTest {
         lrtOracle.initialize(address(lrtConfig));
         priceOracle = new MockPriceOracle();
 
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         lrtOracle.updatePriceOracleFor(address(ethX), address(priceOracle));
         lrtOracle.updatePriceOracleFor(address(stETH), address(priceOracle));
         vm.stopPrank();

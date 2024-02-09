@@ -83,9 +83,9 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
         uint256 balance = token.balanceOf(address(this));
 
-        emit AssetDepositIntoStrategy(asset, strategy, balance);
-
         IEigenStrategyManager(eigenlayerStrategyManagerAddress).depositIntoStrategy(IStrategy(strategy), token, balance);
+
+        emit AssetDepositIntoStrategy(asset, strategy, balance);
     }
 
     /// @notice Transfers an asset back to the LRT deposit pool

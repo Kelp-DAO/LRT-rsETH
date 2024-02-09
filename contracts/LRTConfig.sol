@@ -57,7 +57,7 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     /// @dev Adds a new supported asset
     /// @param asset Asset address
     /// @param depositLimit Deposit limit for the asset
-    function addNewSupportedAsset(address asset, uint256 depositLimit) external onlyRole(LRTConstants.MANAGER) {
+    function addNewSupportedAsset(address asset, uint256 depositLimit) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _addNewSupportedAsset(asset, depositLimit);
     }
 

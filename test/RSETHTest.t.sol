@@ -229,39 +229,3 @@ contract RSETHUnpause is RSETHTest {
         assertFalse(rseth.paused(), "Contract is still paused");
     }
 }
-
-contract RSETHUpdateLRTConfig is RSETHTest {
-    function setUp() public override {
-        super.setUp();
-        rseth.initialize(address(admin), address(lrtConfig));
-    }
-
-    function test_RevertWhenCallerIsNotLRTAdmin() external {
-        vm.startPrank(alice);
-
-        vm.expectRevert(ILRTConfig.CallerNotLRTConfigAdmin.selector);
-
-        rseth.updateLRTConfig(address(lrtConfig));
-        vm.stopPrank();
-    }
-
-    function test_RevertWhenLRTConfigIsZeroAddress() external {
-        vm.startPrank(admin);
-        vm.expectRevert(UtilLib.ZeroAddressNotAllowed.selector);
-        rseth.updateLRTConfig(address(0));
-        vm.stopPrank();
-    }
-
-    function test_UpdateLRTConfig() external {
-        address newLRTConfigAddress = makeAddr("MockNewLRTConfig");
-        ILRTConfig newLRTConfig = ILRTConfig(newLRTConfigAddress);
-
-        vm.startPrank(admin);
-        expectEmit();
-        emit UpdatedLRTConfig(address(newLRTConfig));
-        rseth.updateLRTConfig(address(newLRTConfig));
-        vm.stopPrank();
-
-        assertEq(address(newLRTConfig), address(rseth.lrtConfig()), "LRT config address is not set");
-    }
-}

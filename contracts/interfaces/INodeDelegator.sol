@@ -16,6 +16,9 @@ interface INodeDelegator {
     error StrategyIsNotSetForAsset();
     error InvalidETHSender();
 
+    // getter
+    function stakedButUnverifiedNativeETH() external view returns (uint256);
+
     // methods
     function depositAssetIntoStrategy(address asset) external;
 
@@ -25,5 +28,6 @@ interface INodeDelegator {
 
     function getAssetBalance(address asset) external view returns (uint256);
     function getETHEigenPodBalance() external view returns (uint256);
+    function transferBackToLRTDepositPool(address asset, uint256 amount) external;
     function sendETHFromDepositPoolToNDC() external payable;
 }

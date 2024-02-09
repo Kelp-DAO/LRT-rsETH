@@ -24,6 +24,9 @@ contract MockNodeDelegator {
     address[] public assets;
     uint256[] public assetBalances;
 
+    uint256 private _stakedButUnverifiedNativeETH;
+    uint256 private _eigenPodBalance;
+
     constructor(address[] memory _assets, uint256[] memory _assetBalances) {
         assets = _assets;
         assetBalances = _assetBalances;
@@ -37,8 +40,8 @@ contract MockNodeDelegator {
         return (assets, assetBalances);
     }
 
-    function getETHEigenPodBalance() external pure returns (uint256) {
-        return 1e18;
+    function getETHEigenPodBalance() external view returns (uint256) {
+        return _eigenPodBalance;
     }
 
     function removeAssetBalance() external {
@@ -46,8 +49,24 @@ contract MockNodeDelegator {
         assetBalances[1] = 0;
     }
 
+    function transferBackToLRTDepositPool(address asset, uint256 amount) external {
+        // do nothing
+    }
+
     function sendETHFromDepositPoolToNDC() external payable {
         // do nothing
+    }
+
+    function stakedButUnverifiedNativeETH() external view returns (uint256) {
+        return _stakedButUnverifiedNativeETH;
+    }
+
+    function setStakedButUnverifiedNativeETH(uint256 amount) external {
+        _stakedButUnverifiedNativeETH = amount;
+    }
+
+    function setEigenPodBalance(uint256 amount) external {
+        _eigenPodBalance = amount;
     }
 }
 
@@ -89,9 +108,6 @@ contract LRTDepositPoolTest is BaseTest, RSETHTest {
         // add manager role within LRTConfig
         vm.startPrank(admin);
         lrtConfig.grantRole(LRTConstants.MANAGER, manager);
-        vm.stopPrank();
-
-        vm.startPrank(manager);
         // set ETH as supported token
         lrtConfig.addNewSupportedAsset(LRTConstants.ETH_TOKEN, 100_000 ether);
         vm.stopPrank();
@@ -488,6 +504,11 @@ contract LRTDepositPoolGetETHDistributionData is LRTDepositPoolTest {
         nodeDelegatorQueue[1] = nodeDelegatorContractTwo;
         nodeDelegatorQueue[2] = nodeDelegatorContractThree;
 
+        // mock adding function from NodeDelegator contract to EigenLayer
+        MockNodeDelegator(nodeDelegatorContractOne).setEigenPodBalance(1 ether);
+        MockNodeDelegator(nodeDelegatorContractTwo).setEigenPodBalance(1 ether);
+        MockNodeDelegator(nodeDelegatorContractThree).setEigenPodBalance(1 ether);
+
         vm.startPrank(admin);
         lrtDepositPool.addNodeDelegatorContractToQueue(nodeDelegatorQueue);
         vm.stopPrank();
@@ -502,7 +523,7 @@ contract LRTDepositPoolGetETHDistributionData is LRTDepositPoolTest {
 
         assertEq(ethLyingInDepositPool, 5 ether, "ETH lying in deposit pool is not set");
         assertEq(ethLyingInNDCs, 0, "ETH lying in NDCs is not set");
-        assertEq(ethStakedInEigenLayer, 3 ether, "ETH staked in eigen layer is not set");
+        assertEq(ethStakedInEigenLayer, 3 ether, "ETH staked in eigen layer is not set First test");
 
         // check using getAssetDistributionData
         (ethLyingInDepositPool, ethLyingInNDCs, ethStakedInEigenLayer) =
@@ -510,7 +531,7 @@ contract LRTDepositPoolGetETHDistributionData is LRTDepositPoolTest {
 
         assertEq(ethLyingInDepositPool, 5 ether, "ETH lying in deposit pool is not set");
         assertEq(ethLyingInNDCs, 0, "ETH lying in NDCs is not set");
-        assertEq(ethStakedInEigenLayer, 3 ether, "ETH staked in eigen layer is not set");
+        assertEq(ethStakedInEigenLayer, 3 ether, "ETH staked in eigen layer is not set Second Test");
     }
 }
 
@@ -867,10 +888,8 @@ contract LRTDepositTransferETHToNodeDelegator is LRTDepositPoolTest {
     }
 }
 
-contract LRTDepositPoolSwapAssetFromDepositPool is LRTDepositPoolTest {
-    event AssetSwapped(
-        address indexed fromAsset, address indexed toAsset, uint256 fromAssetAmount, uint256 toAssetAmount
-    );
+contract LRTDepositPoolSwapETHForAssetWithinDepositPool is LRTDepositPoolTest {
+    event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
 
     function setUp() public override {
         super.setUp();
@@ -878,14 +897,13 @@ contract LRTDepositPoolSwapAssetFromDepositPool is LRTDepositPoolTest {
         // initialize LRTDepositPool
         lrtDepositPool.initialize(address(lrtConfig));
 
-        // send 5 stETH to manager
+        // send 5 stETH to lrtDepositPool
         vm.prank(alice);
-        stETH.transfer(manager, 5 ether);
+        stETH.transfer(address(lrtDepositPool), 10 ether);
 
-        // deposit 5 ethX to lrtDepositPool
+        // give 5 eth to manager
         vm.startPrank(alice);
-        ethX.approve(address(lrtDepositPool), 5 ether);
-        lrtDepositPool.depositAsset(address(ethX), 5 ether, 0, "");
+        payable(manager).transfer(5 ether);
         vm.stopPrank();
     }
 
@@ -893,7 +911,7 @@ contract LRTDepositPoolSwapAssetFromDepositPool is LRTDepositPoolTest {
         vm.startPrank(alice);
 
         vm.expectRevert(ILRTConfig.CallerNotLRTConfigManager.selector);
-        lrtDepositPool.swapAssetWithinDepositPool(address(stETH), address(ethX), 1 ether, 1 ether);
+        lrtDepositPool.swapETHForAssetWithinDepositPool{ value: 1 ether }(address(stETH), 1 ether);
 
         vm.stopPrank();
     }
@@ -901,54 +919,53 @@ contract LRTDepositPoolSwapAssetFromDepositPool is LRTDepositPoolTest {
     function test_SwapAssetFromDepositPool() external {
         uint256 amountToSwap = 3 ether;
 
-        uint256 minimumAmountOfEthxToReceive =
-            lrtDepositPool.getSwapAssetReturnAmount(address(stETH), address(ethX), amountToSwap);
+        uint256 minimumAmountOfEthToReceive = lrtDepositPool.getSwapETHToAssetReturnAmount(address(stETH), amountToSwap);
 
-        uint256 balanceOfEthxBefore = ethX.balanceOf(address(lrtDepositPool));
+        uint256 balanceOfEthBefore = address(lrtDepositPool).balance;
         uint256 balanceOfStethBefore = stETH.balanceOf(address(lrtDepositPool));
 
-        uint256 managerBalanceOfEthxBefore = ethX.balanceOf(manager);
+        uint256 managerBalanceOfEthBefore = address(manager).balance;
         uint256 managerBalanceOfStethBefore = stETH.balanceOf(manager);
 
         vm.startPrank(manager);
         stETH.approve(address(lrtDepositPool), amountToSwap);
 
         expectEmit();
-        emit AssetSwapped(address(stETH), address(ethX), amountToSwap, minimumAmountOfEthxToReceive);
-        lrtDepositPool.swapAssetWithinDepositPool(
-            address(stETH), address(ethX), amountToSwap, minimumAmountOfEthxToReceive
+        emit ETHSwappedForLST(amountToSwap, address(stETH), minimumAmountOfEthToReceive);
+        lrtDepositPool.swapETHForAssetWithinDepositPool{ value: amountToSwap }(
+            address(stETH), minimumAmountOfEthToReceive
         );
         vm.stopPrank();
 
-        uint256 balanceOfEthxAfter = ethX.balanceOf(address(lrtDepositPool));
+        uint256 balanceOfEthAfter = address(lrtDepositPool).balance;
         uint256 balanceOfStethAfter = stETH.balanceOf(address(lrtDepositPool));
 
-        uint256 managerBalanceOfEthxAfter = ethX.balanceOf(manager);
+        uint256 managerBalanceOfEthAfter = address(manager).balance;
         uint256 managerBalanceOfStethAfter = stETH.balanceOf(manager);
 
         assertEq(
-            balanceOfEthxAfter,
-            balanceOfEthxBefore - minimumAmountOfEthxToReceive,
-            "Ethx was not removed properly from lrtDepositPool"
+            balanceOfEthAfter,
+            balanceOfEthBefore + minimumAmountOfEthToReceive,
+            "Eth was not added properly from lrtDepositPool"
         );
         assertEq(
-            balanceOfStethAfter, balanceOfStethBefore + amountToSwap, "StETH was not added properly to lrtDepositPool"
+            balanceOfStethAfter, balanceOfStethBefore - amountToSwap, "StETH was not removed properly to lrtDepositPool"
         );
 
         assertEq(
-            managerBalanceOfEthxAfter,
-            managerBalanceOfEthxBefore + minimumAmountOfEthxToReceive,
-            "Ethx was not given properly to manager"
+            managerBalanceOfEthAfter,
+            managerBalanceOfEthBefore - minimumAmountOfEthToReceive,
+            "Eth was not taken properly from the manager"
         );
         assertEq(
             managerBalanceOfStethAfter,
-            managerBalanceOfStethBefore - amountToSwap,
-            "StETH was not removed properly from manager"
+            managerBalanceOfStethBefore + amountToSwap,
+            "StETH was not given properly to the manager"
         );
     }
 }
 
-contract LRTDepositPoolGetSwapAssetReturnAmount is LRTDepositPoolTest {
+contract LRTDepositPoolGetSwapETHToAssetReturnAmount is LRTDepositPoolTest {
     function setUp() public override {
         super.setUp();
 
@@ -959,10 +976,9 @@ contract LRTDepositPoolGetSwapAssetReturnAmount is LRTDepositPoolTest {
     function test_GetSwapAssetReturnAmount() external {
         uint256 amountToSwap = 3 ether;
 
-        uint256 minimumAmountOfEthxToReceive =
-            lrtDepositPool.getSwapAssetReturnAmount(address(stETH), address(ethX), amountToSwap);
+        uint256 minimumAmountOfEthToReceive = lrtDepositPool.getSwapETHToAssetReturnAmount(address(stETH), amountToSwap);
 
-        assertGt(minimumAmountOfEthxToReceive, 1 ether, "Minimum amount of ethx to receive is incorrect");
+        assertGt(minimumAmountOfEthToReceive, 1 ether, "Minimum amount of eth to receive is incorrect");
     }
 }
 

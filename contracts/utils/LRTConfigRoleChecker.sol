@@ -59,6 +59,8 @@ abstract contract LRTConfigRoleChecker {
     /// @dev only callable by LRT admin
     /// @param lrtConfigAddr the new LRT config contract Address
     function updateLRTConfig(address lrtConfigAddr) external virtual onlyLRTAdmin {
+        if (address(lrtConfig) != address(0)) revert ILRTConfig.ValueAlreadyInUse();
+
         UtilLib.checkNonZeroAddress(lrtConfigAddr);
         lrtConfig = ILRTConfig(lrtConfigAddr);
         emit UpdatedLRTConfig(lrtConfigAddr);

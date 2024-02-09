@@ -264,7 +264,7 @@ contract NodeDelegatorDepositAssetIntoStrategy is NodeDelegatorTest {
     function test_RevertWhenAnStrategyIsNotSetForAsset() external {
         address randomAddress = address(0x123);
         uint256 depositLimit = 100 ether;
-        vm.prank(manager);
+        vm.prank(admin);
         lrtConfig.addNewSupportedAsset(randomAddress, depositLimit);
 
         vm.startPrank(manager);
@@ -288,7 +288,7 @@ contract NodeDelegatorDepositAssetIntoStrategy is NodeDelegatorTest {
 contract NodeDelegatorTransferBackToLRTDepositPool is NodeDelegatorTest {
     function setUp() public override {
         super.setUp();
-        vm.prank(manager);
+        vm.prank(admin);
         lrtConfig.addNewSupportedAsset(LRTConstants.ETH_TOKEN, 100_000 ether);
         nodeDel.initialize(address(lrtConfig));
 

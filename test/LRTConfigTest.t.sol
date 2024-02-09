@@ -136,23 +136,23 @@ contract LRTConfigAddNewSupportedAssetTest is LRTConfigTest {
     }
 
     function test_RevertWhenAssetIsZero() external {
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         vm.expectRevert(UtilLib.ZeroAddressNotAllowed.selector);
         lrtConfig.addNewSupportedAsset(address(0), 1000);
         vm.stopPrank();
     }
 
-    function test_RevertAddNewSupportedAssetIfNotManager() external {
+    function test_RevertAddNewSupportedAssetIfNotAdmin() external {
         vm.startPrank(alice);
         vm.expectRevert(
-            "AccessControl: account 0x328809bc894f92807417d2dad6b7c998c1afdac6 is missing role 0xaf290d8680820aad922855f39b306097b20e28774d6c1ad35a20325630c3a02c"
+            "AccessControl: account 0x328809bc894f92807417d2dad6b7c998c1afdac6 is missing role 0x0000000000000000000000000000000000000000000000000000000000000000"
         );
         lrtConfig.addNewSupportedAsset(address(stETH), 1000);
         vm.stopPrank();
     }
 
     function test_RevertAddNewSupportedAssetIfAssetAlreadySupported() external {
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         vm.expectRevert(ILRTConfig.AssetAlreadySupported.selector);
         lrtConfig.addNewSupportedAsset(address(stETH), 1000);
         vm.stopPrank();
@@ -162,7 +162,7 @@ contract LRTConfigAddNewSupportedAssetTest is LRTConfigTest {
         uint256 depositLimit = 1000;
         MockToken newToken = new MockToken("New Token", "NT");
 
-        vm.startPrank(manager);
+        vm.startPrank(admin);
         lrtConfig.addNewSupportedAsset(address(newToken), depositLimit);
         vm.stopPrank();
 
