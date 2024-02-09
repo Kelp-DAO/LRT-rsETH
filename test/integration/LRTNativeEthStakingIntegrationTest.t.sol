@@ -3,6 +3,7 @@ pragma solidity 0.8.21;
 
 import "forge-std/Test.sol";
 
+import { ProxyFactory } from "script/foundry-scripts/utils/ProxyFactory.sol";
 import { LRTConfig, ILRTConfig, LRTConstants } from "contracts/LRTConfig.sol";
 import { RSETH } from "contracts/RSETH.sol";
 import { LRTOracle } from "contracts/LRTOracle.sol";
@@ -21,6 +22,7 @@ contract LRTNativeEthStakingIntegrationTest is Test {
     address public manager;
     address public operator;
 
+    ProxyFactory proxyFactory;
     ProxyAdmin proxyAdmin;
     LRTDepositPool public lrtDepositPool;
     LRTConfig public lrtConfig;
@@ -40,10 +42,6 @@ contract LRTNativeEthStakingIntegrationTest is Test {
         proxyAddress = address(lrtDepositPool);
         newImplementation = address(new LRTDepositPool());
         proxyAdmin.upgrade(ITransparentUpgradeableProxy(proxyAddress), newImplementation);
-
-        // remove faulty ndcs
-        lrtDepositPool.removeNodeDelegatorContractFromQueue(0xAb96EB807c9dFE59E9d52f7F428A6D35f12728c6);
-        lrtDepositPool.removeNodeDelegatorContractFromQueue(0x2107EA068FD85E125Be422AFC86d2E57A6d085d8);
 
         // upgrade all ndcs
         address[] memory ndcs = lrtDepositPool.getNodeDelegatorQueue();
@@ -73,6 +71,7 @@ contract LRTNativeEthStakingIntegrationTest is Test {
         manager = 0xCbcdd778AA25476F203814214dD3E9b9c46829A1;
         operator = makeAddr("operator");
 
+        proxyFactory = ProxyFactory(0x673a669425457bCabeb247f56552A0Fd8141cee2);
         proxyAdmin = ProxyAdmin(0xb61e0E39b6d4030C36A176f576aaBE44BF59Dc78);
         lrtDepositPool = LRTDepositPool(payable(0x036676389e48133B63a802f8635AD39E752D375D));
         lrtConfig = LRTConfig(0x947Cb49334e6571ccBFEF1f1f1178d8469D65ec7);
@@ -196,5 +195,42 @@ contract LRTNativeEthStakingIntegrationTest is Test {
             assetStakedInEigenLayerInitially + 64 ether,
             "eth not transferred back to deposit pool"
         );
+    }
+
+    function test_removeNDCs() external {
+        // ------ STEP1: add NDCs ---------
+
+        NodeDelegator nodeDelegatorImplementation = new NodeDelegator();
+        bytes32 salt1 = keccak256(abi.encodePacked("test-ndc1"));
+        NodeDelegator testNodeDelegatorProxy1 = NodeDelegator(
+            payable(proxyFactory.create(address(nodeDelegatorImplementation), address(proxyAdmin), salt1))
+        );
+
+        bytes32 salt2 = keccak256(abi.encodePacked("test-ndc2"));
+        NodeDelegator testNodeDelegatorProxy2 = NodeDelegator(
+            payable(proxyFactory.create(address(nodeDelegatorImplementation), address(proxyAdmin), salt2))
+        );
+
+        testNodeDelegatorProxy1.initialize(address(lrtConfig));
+        testNodeDelegatorProxy2.initialize(address(lrtConfig));
+
+        address[] memory testNDCArray = new address[](2);
+        testNDCArray[0] = address(testNodeDelegatorProxy1);
+        testNDCArray[1] = address(testNodeDelegatorProxy2);
+
+        // add ndcs to queue
+        vm.prank(admin);
+        lrtDepositPool.addNodeDelegatorContractToQueue(testNDCArray);
+
+        assertTrue(lrtDepositPool.isNodeDelegator(address(testNodeDelegatorProxy1)) != 0);
+        assertTrue(lrtDepositPool.isNodeDelegator(address(testNodeDelegatorProxy2)) != 0);
+
+        // ------ STEP2: remove NDCs ---------
+
+        vm.prank(admin);
+        lrtDepositPool.removeManyNodeDelegatorContractsFromQueue(testNDCArray);
+
+        assertTrue(lrtDepositPool.isNodeDelegator(address(testNodeDelegatorProxy1)) == 0);
+        assertTrue(lrtDepositPool.isNodeDelegator(address(testNodeDelegatorProxy2)) == 0);
     }
 }
