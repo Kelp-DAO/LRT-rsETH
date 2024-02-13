@@ -12,6 +12,7 @@ import { NodeDelegator } from "contracts/NodeDelegator.sol";
 import { LRTDepositPool } from "contracts/LRTDepositPool.sol";
 import { UtilLib } from "contracts/utils/UtilLib.sol";
 import { getLSTs } from "script/foundry-scripts/DeployLRT.s.sol";
+import { IEigenPod, IBeaconDeposit } from "contracts/interfaces/IEigenPod.sol";
 
 import { ITransparentUpgradeableProxy } from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
@@ -196,6 +197,39 @@ contract LRTNativeEthStakingIntegrationTest is Test {
             assetStakedInEigenLayerInitially + 64 ether,
             "eth not transferred back to deposit pool"
         );
+    }
+
+    function test_stake32EthValidated() external returns (bytes32) {
+        // create eigen pod
+        vm.prank(manager);
+        nodeDelegator1.createEigenPod();
+
+        address eigenPod = address(nodeDelegator1.eigenPod());
+        // same eigenPod address should be created
+        assertEq(eigenPod, 0xf7483e448c1B94Ea557A53d99ebe7b4feE0c91df, "Wrong eigenPod address");
+
+        // stake 32 eth for validator1
+        bytes memory pubkey =
+            hex"8ff0088bf2bc73a41c74d1b1c6c997e4963ceffde55a09fef27596016d919b74b45372e8aa69fda5aac38a0c1a38dfd5";
+        bytes memory signature = hex"95e07ee28de0316ecdf9b528c222d81242898ee0095e284582bb453d331b7760"
+            hex"6d8dca23ab8980459ea8a9b9710e2f740fceb1a1c221a7fd75eb3ef4a6b68809"
+            hex"f3e76387f01f5d31718e6306375b20b29cb08d1374c7fb125d50c1b2f5a5cc0b";
+
+        bytes32 depositDataRoot = hex"6f30f44f0d8dada6ba5d8fd617c727020c01c697587d1a04ff6661be656198bc";
+
+        IBeaconDeposit depositContract = IEigenPod(eigenPod).ethPOS();
+        bytes32 expectedDepositRoot = depositContract.get_deposit_root();
+
+        vm.deal(address(nodeDelegator1), 32 ether);
+        uint256 balanceBefore = address(nodeDelegator1).balance;
+
+        vm.startPrank(operator);
+        nodeDelegator1.stake32EthValidated(pubkey, signature, depositDataRoot, expectedDepositRoot);
+
+        uint256 balanceAfter = address(nodeDelegator1).balance;
+        assertEq(balanceAfter, balanceBefore - 32 ether, "stake32eth unsuccesful");
+
+        return expectedDepositRoot;
     }
 
     function test_withdrawRewards() external {

@@ -45,7 +45,16 @@ library BeaconChainProofs {
     }
 }
 
+interface IBeaconDeposit {
+    /// @notice Query the current deposit root hash.
+    /// @return The deposit root hash.
+    function get_deposit_root() external view returns (bytes32);
+}
+
 interface IEigenPod {
+    /// @notice This is the beacon chain deposit contract
+    function ethPOS() external returns (IBeaconDeposit);
+
     /// @return delayedWithdrawalRouter address of eigenlayer delayedWithdrawalRouter,
     /// which does book keeping of delayed withdrawls
     function delayedWithdrawalRouter() external returns (address);

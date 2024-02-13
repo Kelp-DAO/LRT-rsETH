@@ -17,8 +17,10 @@ interface INodeDelegator {
     error StrategyIsNotSetForAsset();
     error InvalidETHSender();
     error InvalidRewardAmount();
+    error InvalidDepositRoot(bytes32 expectedDepositRoot, bytes32 actualDepositRoot);
 
     // getter
+
     function stakedButUnverifiedNativeETH() external view returns (uint256);
 
     // methods

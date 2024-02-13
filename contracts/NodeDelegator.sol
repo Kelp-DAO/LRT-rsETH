@@ -15,7 +15,7 @@ import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/securit
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
 import { IEigenPodManager } from "./interfaces/IEigenPodManager.sol";
-import { IEigenPod, BeaconChainProofs } from "./interfaces/IEigenPod.sol";
+import { IEigenPod, BeaconChainProofs, IBeaconDeposit } from "./interfaces/IEigenPod.sol";
 
 /// @title NodeDelegator Contract
 /// @notice The contract that handles the depositing of assets into strategies
@@ -181,11 +181,43 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         whenNotPaused
         onlyLRTOperator
     {
-        // Call the stake function in the EigenPodManager
         IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
         eigenPodManager.stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
 
-        // Increment the staked but not verified ETH
+        // tracks staked but unverified native ETH
+        stakedButUnverifiedNativeETH += 32 ether;
+
+        emit ETHStaked(pubkey, 32 ether);
+    }
+
+    /// @notice Stake ETH from NDC into EigenLayer
+    /// @param pubkey The pubkey of the validator
+    /// @param signature The signature of the validator
+    /// @param depositDataRoot The deposit data root of the validator
+    /// @param expectedDepositRoot The expected deposit data root, which is computed offchain
+    /// @dev Only LRT Operator should call this function
+    /// @dev Exactly 32 ether is allowed, hence it is hardcoded
+    /// @dev offchain checks withdraw credentials authenticity
+    /// @dev compares expected deposit root with actual deposit root
+    function stake32EthValidated(
+        bytes calldata pubkey,
+        bytes calldata signature,
+        bytes32 depositDataRoot,
+        bytes32 expectedDepositRoot
+    )
+        external
+        whenNotPaused
+        onlyLRTOperator
+    {
+        IBeaconDeposit depositContract = eigenPod.ethPOS();
+        bytes32 actualDepositRoot = depositContract.get_deposit_root();
+        if (expectedDepositRoot != actualDepositRoot) {
+            revert InvalidDepositRoot(expectedDepositRoot, actualDepositRoot);
+        }
+        IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
+        eigenPodManager.stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
+
+        // tracks staked but unverified native ETH
         stakedButUnverifiedNativeETH += 32 ether;
 
         emit ETHStaked(pubkey, 32 ether);
