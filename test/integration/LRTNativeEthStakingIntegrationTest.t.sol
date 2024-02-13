@@ -59,8 +59,9 @@ contract LRTNativeEthStakingIntegrationTest is Test {
 
         // add oracle for ETH
         address oneETHOracle = address(new OneETHPriceOracle());
-        vm.prank(manager);
+        vm.startPrank(manager);
         lrtOracle.updatePriceOracleFor(LRTConstants.ETH_TOKEN, oneETHOracle);
+        vm.stopPrank();
     }
 
     function setUp() public {
@@ -195,6 +196,53 @@ contract LRTNativeEthStakingIntegrationTest is Test {
             assetStakedInEigenLayerInitially + 64 ether,
             "eth not transferred back to deposit pool"
         );
+    }
+
+    function test_withdrawRewards() external {
+        // create eigen pod
+        vm.prank(manager);
+        nodeDelegator1.createEigenPod();
+
+        address eigenPod = address(nodeDelegator1.eigenPod());
+        // same eigenPod address should be created
+        assertEq(eigenPod, 0xf7483e448c1B94Ea557A53d99ebe7b4feE0c91df, "Wrong eigenPod address");
+
+        // stake 32 eth for validator1
+        bytes memory pubkey =
+            hex"8ff0088bf2bc73a41c74d1b1c6c997e4963ceffde55a09fef27596016d919b74b45372e8aa69fda5aac38a0c1a38dfd5";
+        bytes memory signature = hex"95e07ee28de0316ecdf9b528c222d81242898ee0095e284582bb453d331b7760"
+            hex"6d8dca23ab8980459ea8a9b9710e2f740fceb1a1c221a7fd75eb3ef4a6b68809"
+            hex"f3e76387f01f5d31718e6306375b20b29cb08d1374c7fb125d50c1b2f5a5cc0b";
+
+        bytes32 depositDataRoot = hex"6f30f44f0d8dada6ba5d8fd617c727020c01c697587d1a04ff6661be656198bc";
+
+        vm.deal(address(nodeDelegator1), 32 ether);
+        vm.startPrank(operator);
+        nodeDelegator1.stake32Eth(pubkey, signature, depositDataRoot);
+
+        // eigenPod receives some rewards
+        uint256 rewardsAmount = 2.5 ether;
+        vm.deal(address(eigenPod), rewardsAmount);
+
+        assertEq(address(eigenPod).balance, rewardsAmount);
+
+        nodeDelegator1.initiateWithdrawRewards();
+
+        // rewards moves to delayedWithdrawalRouter
+        assertEq(address(eigenPod).balance, 0);
+
+        console.log("block number before vm.roll: ", block.number);
+        // set block to  7 days after so that rewards can be claimed
+        vm.roll(block.number + 50_400);
+        console.log("block number after vm.roll: ", block.number);
+
+        uint256 ndcBalanceBefore = address(nodeDelegator1).balance;
+
+        nodeDelegator1.claimRewards(1);
+
+        assertEq(address(nodeDelegator1).balance, ndcBalanceBefore + rewardsAmount);
+
+        vm.stopPrank();
     }
 
     function test_removeNDCs() external {

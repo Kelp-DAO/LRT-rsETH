@@ -12,7 +12,7 @@ interface ILRTDepositPool {
     error MinimumAmountToReceiveNotMet();
     error NodeDelegatorNotFound();
     error NodeDelegatorHasAssetBalance(address assetAddress, uint256 assetBalance);
-    error NodeDelegatorHasETHInEigenlayer();
+    error NodeDelegatorHasETH();
 
     //events
     event MaxNodeDelegatorLimitUpdated(uint256 maxNodeDelegatorLimit);

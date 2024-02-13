@@ -8,6 +8,7 @@ import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.s
 import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
 import { IStrategy } from "./interfaces/IStrategy.sol";
 import { IEigenStrategyManager } from "./interfaces/IEigenStrategyManager.sol";
+import { IEigenDelayedWithdrawalRouter } from "./interfaces/IEigenDelayedWithdrawalRouter.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
@@ -161,9 +162,6 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         // feature is activated. Additionally, ensure verification of both staked but unverified and staked and verified
         // ETH native supply NDCs as provided to Eigenlayer.
         ethStaked = stakedButUnverifiedNativeETH;
-        if (address(eigenPod) != address(0)) {
-            ethStaked += address(eigenPod).balance;
-        }
     }
 
     /// @notice Stake ETH from NDC into EigenLayer. it calls the stake function in the EigenPodManager
@@ -173,12 +171,14 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @param depositDataRoot The deposit data root of the validator
     /// @dev Only LRT Operator should call this function
     /// @dev Exactly 32 ether is allowed, hence it is hardcoded
+    /// @dev offchain checks withdraw credentials authenticity
     function stake32Eth(
         bytes calldata pubkey,
         bytes calldata signature,
         bytes32 depositDataRoot
     )
         external
+        whenNotPaused
         onlyLRTOperator
     {
         // Call the stake function in the EigenPodManager
@@ -189,6 +189,31 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         stakedButUnverifiedNativeETH += 32 ether;
 
         emit ETHStaked(pubkey, 32 ether);
+    }
+
+    /// @dev initiate a delayed withdraw of the ETH before the eigenpod is verified
+    /// which will be available to claim after withdrawalDelay blocks
+    function initiateWithdrawRewards() external onlyLRTOperator {
+        uint256 eigenPodBalance = address(eigenPod).balance;
+        uint256 ethValidatorMinBalanceThreshold = 16 ether;
+        if (eigenPodBalance > ethValidatorMinBalanceThreshold) {
+            revert InvalidRewardAmount();
+        }
+
+        eigenPod.withdrawBeforeRestaking();
+        emit ETHRewardsWithdrawInitiated(eigenPodBalance);
+    }
+
+    /// @dev claims back the withdrawal amount initiated to this nodeDelegator contract
+    /// once withdrawal amount is claimable
+    function claimRewards(uint256 maxNumberOfDelayedWithdrawalsToClaim) external onlyLRTOperator {
+        uint256 balanceBefore = address(this).balance;
+        address delayedRouterAddr = eigenPod.delayedWithdrawalRouter();
+        IEigenDelayedWithdrawalRouter elDelayedRouter = IEigenDelayedWithdrawalRouter(delayedRouterAddr);
+        elDelayedRouter.claimDelayedWithdrawals(address(this), maxNumberOfDelayedWithdrawalsToClaim);
+        uint256 balanceAfter = address(this).balance;
+
+        emit ETHRewardsClaimed(balanceAfter - balanceBefore);
     }
 
     /// @dev Triggers stopped state. Contract must not be paused.
@@ -212,8 +237,6 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         emit ETHDepositFromDepositPool(msg.value);
     }
 
-    /// @dev allow NodeDelegator to receive ETH rewards
-    receive() external payable {
-        emit ETHRewardsReceived(msg.value);
-    }
+    /// @dev allow NodeDelegator to receive ETH
+    receive() external payable { }
 }

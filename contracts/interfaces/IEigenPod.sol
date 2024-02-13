@@ -46,6 +46,13 @@ library BeaconChainProofs {
 }
 
 interface IEigenPod {
+    /// @return delayedWithdrawalRouter address of eigenlayer delayedWithdrawalRouter,
+    /// which does book keeping of delayed withdrawls
+    function delayedWithdrawalRouter() external returns (address);
+
+    /// @notice Called by the pod owner to withdraw the balance of the pod when `hasRestaked` is set to false
+    function withdrawBeforeRestaking() external;
+
     /**
      * @notice This function verifies that the withdrawal credentials of the podOwner are pointed to
      * this contract. It also verifies the current (not effective) balance  of the validator.  It verifies the provided

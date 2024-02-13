@@ -9,12 +9,14 @@ interface INodeDelegator {
     event ETHDepositFromDepositPool(uint256 depositAmount);
     event EigenPodCreated(address indexed eigenPod, address indexed podOwner);
     event ETHStaked(bytes valPubKey, uint256 amount);
-    event ETHRewardsReceived(uint256 amount);
+    event ETHRewardsClaimed(uint256 amount);
+    event ETHRewardsWithdrawInitiated(uint256 amount);
 
     // errors
     error TokenTransferFailed();
     error StrategyIsNotSetForAsset();
     error InvalidETHSender();
+    error InvalidRewardAmount();
 
     // getter
     function stakedButUnverifiedNativeETH() external view returns (uint256);

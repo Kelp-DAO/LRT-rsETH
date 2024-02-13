@@ -250,33 +250,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     /// @dev only callable by LRT admin
     /// @param nodeDelegatorAddress NodeDelegator contract address
     function removeNodeDelegatorContractFromQueue(address nodeDelegatorAddress) public onlyLRTAdmin {
-        // 1. revert if node delegator contract has asset in eigenlayer asset strategies
-
-        // 1.1 check if NDC has native ETH balance in eigen layer
-        if (INodeDelegator(nodeDelegatorAddress).getETHEigenPodBalance() > 0) {
-            revert NodeDelegatorHasETHInEigenlayer();
-        }
-
-        // 1.2 check if NDC has LST balance in eigen layer
-        (address[] memory assets, uint256[] memory assetBalances) =
-            INodeDelegator(nodeDelegatorAddress).getAssetBalances();
-
-        uint256 assetsLength = assets.length;
-        for (uint256 i; i < assetsLength;) {
-            if (assetBalances[i] > 0) {
-                revert NodeDelegatorHasAssetBalance(assets[i], assetBalances[i]);
-            }
-
-            if (IERC20(assets[i]).balanceOf(nodeDelegatorAddress) > 0) {
-                revert NodeDelegatorHasAssetBalance(assets[i], IERC20(assets[i]).balanceOf(nodeDelegatorAddress));
-            }
-
-            unchecked {
-                ++i;
-            }
-        }
-
-        // 2. remove node delegator contract from queue
+        // 1. check if node delegator contract is in queue
         uint256 length = nodeDelegatorQueue.length;
         uint256 ndcIndex;
 
@@ -286,6 +260,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
                 break;
             }
 
+            // 1.1 If node delegator contract is not found in queue, revert
             if (i == length - 1) {
                 revert NodeDelegatorNotFound();
             }
@@ -295,9 +270,40 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
             }
         }
 
-        // 2.1 remove from isNodeDelegator mapping
+        // 2. revert if node delegator contract has any asset balances.
+
+        // 2.1 check if NDC has native ETH balance in eigen layer and in itself.
+        if (
+            INodeDelegator(nodeDelegatorAddress).getETHEigenPodBalance() > 0
+                || address(nodeDelegatorAddress).balance > 0
+        ) {
+            revert NodeDelegatorHasETH();
+        }
+
+        // 2.2  check if NDC has LST balance
+        address[] memory supportedAssets = lrtConfig.getSupportedAssetList();
+        uint256 supportedAssetsLength = supportedAssets.length;
+
+        uint256 assetBalance;
+        for (uint256 i; i < supportedAssetsLength; i++) {
+            if (supportedAssets[i] == LRTConstants.ETH_TOKEN) {
+                // ETH already checked above.
+                continue;
+            }
+
+            assetBalance = IERC20(supportedAssets[i]).balanceOf(nodeDelegatorAddress)
+                + INodeDelegator(nodeDelegatorAddress).getAssetBalance(supportedAssets[i]);
+
+            if (assetBalance > 0) {
+                revert NodeDelegatorHasAssetBalance(supportedAssets[i], assetBalance);
+            }
+        }
+
+        // 3. remove node delegator contract from queue
+
+        // 3.1 remove from isNodeDelegator mapping
         isNodeDelegator[nodeDelegatorAddress] = 0;
-        // 2.2 remove from nodeDelegatorQueue
+        // 3.2 remove from nodeDelegatorQueue
         nodeDelegatorQueue[ndcIndex] = nodeDelegatorQueue[length - 1];
         nodeDelegatorQueue.pop();
 

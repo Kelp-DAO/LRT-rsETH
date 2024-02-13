@@ -23,6 +23,7 @@ contract LRTOracleMock {
 contract MockNodeDelegator {
     address[] public assets;
     uint256[] public assetBalances;
+    uint256 public mockAssetBalance;
 
     uint256 private _stakedButUnverifiedNativeETH;
     uint256 private _eigenPodBalance;
@@ -30,10 +31,11 @@ contract MockNodeDelegator {
     constructor(address[] memory _assets, uint256[] memory _assetBalances) {
         assets = _assets;
         assetBalances = _assetBalances;
+        mockAssetBalance = 1e18;
     }
 
-    function getAssetBalance(address) external pure returns (uint256) {
-        return 1e18;
+    function getAssetBalance(address) external view returns (uint256) {
+        return mockAssetBalance;
     }
 
     function getAssetBalances() external view returns (address[] memory, uint256[] memory) {
@@ -47,6 +49,7 @@ contract MockNodeDelegator {
     function removeAssetBalance() external {
         assetBalances[0] = 0;
         assetBalances[1] = 0;
+        mockAssetBalance = 0;
     }
 
     function transferBackToLRTDepositPool(address asset, uint256 amount) external {
@@ -637,7 +640,7 @@ contract LRTDepositPoolAddNodeDelegatorContractToQueue is LRTDepositPoolTest {
     }
 }
 
-contract LTRRemoveNodeDelegatorFromQueue is LRTDepositPoolTest {
+contract LRTDepositPoolRemoveNodeDelegatorFromQueue is LRTDepositPoolTest {
     address public nodeDelegatorContractOne;
     address public nodeDelegatorContractTwo;
     address public nodeDelegatorContractThree;

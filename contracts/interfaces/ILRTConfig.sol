@@ -10,6 +10,8 @@ interface ILRTConfig {
     error CallerNotLRTConfigManager();
     error CallerNotLRTConfigOperator();
     error CallerNotLRTConfigAllowedRole(string role);
+    error CannotUpdateStrategyAsItHasFundsNDCFunds(address ndc, uint256 amount);
+    error InvalidMaxRewardAmount();
 
     // Events
     event SetToken(bytes32 key, address indexed tokenAddr);
@@ -19,8 +21,7 @@ interface ILRTConfig {
     event AssetDepositLimitUpdate(address indexed asset, uint256 depositLimit);
     event AssetStrategyUpdate(address indexed asset, address indexed strategy);
     event SetRSETH(address indexed rsETH);
-
-    error CannotUpdateStrategyAsItHasFundsNDCFunds(address ndc, uint256 amount);
+    event UpdateMaxRewardAmount(uint256 maxRewardAmount);
 
     // methods
 
