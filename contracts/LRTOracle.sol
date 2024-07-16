@@ -9,16 +9,23 @@ import { IRSETH } from "./interfaces/IRSETH.sol";
 import { IPriceFetcher } from "./interfaces/IPriceFetcher.sol";
 import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
-import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
 
-import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /// @title LRTOracle Contract
 /// @notice oracle contract that calculates the exchange rate of assets
 contract LRTOracle is ILRTOracle, LRTConfigRoleChecker, Initializable {
     mapping(address asset => address priceOracle) public override assetPriceOracle;
+
     uint256 public override rsETHPrice;
+    uint256 public pricePercentageLimit;
+
+    modifier onlySupportedOracle(address asset) {
+        if (assetPriceOracle[asset] == address(0)) {
+            revert AssetOracleNotSupported();
+        }
+        _;
+    }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -35,20 +42,13 @@ contract LRTOracle is ILRTOracle, LRTConfigRoleChecker, Initializable {
     }
 
     /*//////////////////////////////////////////////////////////////
-                            view functions
+                            write functions
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Provides Asset/ETH exchange rate
-    /// @dev reads from priceFetcher interface which may fetch price from any supported oracle
-    /// @param asset the asset for which exchange rate is required
-    /// @return assetPrice exchange rate of asset
-    function getAssetPrice(address asset) public view onlySupportedAsset(asset) returns (uint256) {
-        return IPriceFetcher(assetPriceOracle[asset]).getAssetPrice(asset);
-    }
 
     /// @notice updates RSETH/ETH exchange rate
     /// @dev calculates based on stakedAsset value received from eigen layer
     function updateRSETHPrice() external {
+        uint256 oldRsETHPrice = rsETHPrice;
         address rsETHTokenAddress = lrtConfig.rsETH();
         uint256 rsEthSupply = IRSETH(rsETHTokenAddress).totalSupply();
 
@@ -76,18 +76,57 @@ contract LRTOracle is ILRTOracle, LRTConfigRoleChecker, Initializable {
         }
 
         rsETHPrice = totalETHInPool / rsEthSupply;
+
+        if (_isNewPriceOffLimit(oldRsETHPrice, rsETHPrice)) revert RSETHPriceExceedsLimit();
+
+        emit RsETHPriceUpdate(rsETHPrice);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                            write functions
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev add/update the price oracle of any supported asset
+    /// @dev add/update the price oracle of any asset
     /// @dev only onlyLRTAdmin is allowed
     /// @param asset asset address for which oracle price needs to be added/updated
-    function updatePriceOracleFor(address asset, address priceOracle) external onlyLRTAdmin onlySupportedAsset(asset) {
+    function updatePriceOracleFor(address asset, address priceOracle) external onlyLRTAdmin {
         UtilLib.checkNonZeroAddress(priceOracle);
         assetPriceOracle[asset] = priceOracle;
         emit AssetPriceOracleUpdate(asset, priceOracle);
+    }
+
+    /// @dev set the price percentage limit
+    /// @dev only onlyLRTAdmin is allowed
+    /// @param _pricePercentageLimit price percentage limit
+    function setPricePercentageLimit(uint256 _pricePercentageLimit) external onlyLRTAdmin {
+        pricePercentageLimit = _pricePercentageLimit;
+        emit PricePercentageLimitUpdate(_pricePercentageLimit);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            view functions
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Provides Asset/ETH exchange rate
+    /// @dev reads from priceFetcher interface which may fetch price from any supported oracle
+    /// @param asset the asset for which exchange rate is required
+    /// @return assetPrice exchange rate of asset
+    function getAssetPrice(address asset) public view onlySupportedOracle(asset) returns (uint256) {
+        return IPriceFetcher(assetPriceOracle[asset]).getAssetPrice(asset);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            private functions
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice check if new price is off the price percentage limit
+    /// @param oldPrice old price
+    /// @param newPrice new price
+    function _isNewPriceOffLimit(uint256 oldPrice, uint256 newPrice) private view returns (bool) {
+        // if oldPrice == newPrice, then no need to check
+        if (oldPrice == newPrice) return false;
+        // if pricePercentageLimit is 0, then no need to check
+        if (pricePercentageLimit == 0) return false;
+
+        // calculate the difference between old and new price
+        uint256 diff = (oldPrice > newPrice) ? oldPrice - newPrice : newPrice - oldPrice;
+        uint256 percentage = (diff * 100) / oldPrice;
+        return percentage > pricePercentageLimit;
     }
 }

@@ -28,4 +28,9 @@ contract RSETHRateProvider is CrossChainRateProvider {
     function getLatestRate() public view override returns (uint256) {
         return ILRTOracle(rsETHPriceOracle).rsETHPrice();
     }
+
+    /// @notice Calls the getLatestRate function and returns the rate
+    function getRate() external view returns (uint256) {
+        return getLatestRate();
+    }
 }

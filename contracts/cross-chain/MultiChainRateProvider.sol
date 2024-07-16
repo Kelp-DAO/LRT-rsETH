@@ -4,7 +4,7 @@ pragma solidity 0.8.21;
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-import { ILayerZeroEndpoint } from "../interfaces/ILayerZeroEndpoint.sol";
+import { ILayerZeroEndpoint } from "contracts/external/layerzero/interfaces/ILayerZeroEndpoint.sol";
 
 /// @title Multi chain rate provider. By witherblock reference: https://github.com/witherblock/gyarados
 /// @notice Provides a rate to a multiple receiver contracts on a different chain than the one this contract is deployed

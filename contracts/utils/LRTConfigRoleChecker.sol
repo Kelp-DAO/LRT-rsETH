@@ -7,6 +7,7 @@ import { LRTConstants } from "./LRTConstants.sol";
 import { ILRTConfig } from "../interfaces/ILRTConfig.sol";
 
 import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
+import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 
 /// @title LRTConfigRoleChecker - LRT Config Role Checker Contract
 /// @notice Handles LRT config role checks

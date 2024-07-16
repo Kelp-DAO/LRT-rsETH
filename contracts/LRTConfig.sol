@@ -4,7 +4,7 @@ pragma solidity 0.8.21;
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
 import { ILRTConfig } from "./interfaces/ILRTConfig.sol";
-import { IStrategy } from "./interfaces/IStrategy.sol";
+import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -22,16 +22,16 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
 
     address public rsETH;
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
     modifier onlySupportedAsset(address asset) {
         if (!isSupportedAsset[asset]) {
             revert AssetNotSupported();
         }
         _;
+    }
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
 
     /// @dev Initializes the contract
@@ -132,10 +132,12 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
                             GETTERS
     //////////////////////////////////////////////////////////////*/
     function getLSTToken(bytes32 tokenKey) external view override returns (address) {
+        UtilLib.checkNonZeroAddress(tokenMap[tokenKey]);
         return tokenMap[tokenKey];
     }
 
     function getContract(bytes32 contractKey) public view override returns (address) {
+        UtilLib.checkNonZeroAddress(contractMap[contractKey]);
         return contractMap[contractKey];
     }
 

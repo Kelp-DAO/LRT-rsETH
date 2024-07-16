@@ -11,4 +11,14 @@ library UtilLib {
     function checkNonZeroAddress(address address_) internal pure {
         if (address_ == address(0)) revert ZeroAddressNotAllowed();
     }
+
+    function getMin(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a < b) return a;
+        return b;
+    }
+
+    function getMax(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a > b) return a;
+        return b;
+    }
 }

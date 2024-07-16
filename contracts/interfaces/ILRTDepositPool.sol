@@ -3,7 +3,6 @@ pragma solidity 0.8.21;
 
 interface ILRTDepositPool {
     //errors
-    error TokenTransferFailed();
     error InvalidAmountToDeposit();
     error NotEnoughAssetToTransfer();
     error MaximumDepositLimitReached();
@@ -13,6 +12,7 @@ interface ILRTDepositPool {
     error NodeDelegatorNotFound();
     error NodeDelegatorHasAssetBalance(address assetAddress, uint256 assetBalance);
     error NodeDelegatorHasETH();
+    error EthTransferFailed();
 
     //events
     event MaxNodeDelegatorLimitUpdated(uint256 maxNodeDelegatorLimit);
@@ -27,8 +27,11 @@ interface ILRTDepositPool {
     );
     event ETHDeposit(address indexed depositor, uint256 depositAmount, uint256 rsethMintAmount, string referralId);
     event MinAmountToDepositUpdated(uint256 minAmountToDeposit);
+    event MaxNegligibleAmountUpdated(uint256 maxNegligibleAmount);
     event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
+    event EthTransferred(address to, uint256 amount);
 
+    // functions
     function depositAsset(
         address asset,
         uint256 depositAmount,
@@ -36,6 +39,14 @@ interface ILRTDepositPool {
         string calldata referralId
     )
         external;
+
+    function getSwapETHToAssetReturnAmount(
+        address toAsset,
+        uint256 ethAmountToSend
+    )
+        external
+        view
+        returns (uint256 returnAmount);
 
     function getTotalAssetDeposits(address asset) external view returns (uint256);
 
@@ -54,10 +65,31 @@ interface ILRTDepositPool {
     function getAssetDistributionData(address asset)
         external
         view
-        returns (uint256 assetLyingInDepositPool, uint256 assetLyingInNDCs, uint256 assetStakedInEigenLayer);
+        returns (
+            uint256 assetLyingInDepositPool,
+            uint256 assetLyingInNDCs,
+            uint256 assetStakedInEigenLayer,
+            uint256 assetUnstakingFromEigenLayer,
+            uint256 assetLyingInConverter,
+            uint256 assetLyingUnstakingVault
+        );
 
     function getETHDistributionData()
         external
         view
-        returns (uint256 ethLyingInDepositPool, uint256 ethLyingInNDCs, uint256 ethStakedInEigenLayer);
+        returns (
+            uint256 ethLyingInDepositPool,
+            uint256 ethLyingInNDCs,
+            uint256 ethStakedInEigenLayer,
+            uint256 ethUnstakingFromEigenLayer,
+            uint256 ethLyingInConverter,
+            uint256 ethLyingInUnstakingVault
+        );
+
+    function isNodeDelegator(address nodeDelegatorContract) external view returns (uint256);
+
+    // receivers
+    function receiveFromRewardReceiver() external payable;
+    function receiveFromLRTConverter() external payable;
+    function receiveFromNodeDelegator() external payable;
 }

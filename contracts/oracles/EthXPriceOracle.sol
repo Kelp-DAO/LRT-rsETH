@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity 0.8.21;
 
 import { UtilLib } from "../utils/UtilLib.sol";
@@ -17,7 +17,9 @@ interface IStaderConfig {
 /// @title EthXPriceOracle Contract
 /// @notice contract that fetches the exchange rate of ETHX/ETH
 contract EthXPriceOracle is IPriceFetcher, Initializable {
+    /// @dev deprecated
     address public ethXStakePoolsManagerProxyAddress;
+    address public ethxAddress;
 
     error InvalidAsset();
 
@@ -33,13 +35,16 @@ contract EthXPriceOracle is IPriceFetcher, Initializable {
         ethXStakePoolsManagerProxyAddress = ethXStakePoolsManagerProxyAddress_;
     }
 
+    function initialize2() external reinitializer(2) {
+        address staderConfigProxyAddress = IETHXStakePoolsManager(ethXStakePoolsManagerProxyAddress).staderConfig();
+        ethxAddress = IStaderConfig(staderConfigProxyAddress).getETHxToken();
+    }
+
     /// @notice Fetches Asset/ETH exchange rate
     /// @param asset the asset for which exchange rate is required
     /// @return assetPrice exchange rate of asset
     function getAssetPrice(address asset) external view returns (uint256) {
-        address staderConfigProxyAddress = IETHXStakePoolsManager(ethXStakePoolsManagerProxyAddress).staderConfig();
-
-        if (asset != IStaderConfig(staderConfigProxyAddress).getETHxToken()) {
+        if (asset != ethxAddress) {
             revert InvalidAsset();
         }
 
