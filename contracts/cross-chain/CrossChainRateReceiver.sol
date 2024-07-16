@@ -3,7 +3,7 @@ pragma solidity 0.8.21;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
-import { ILayerZeroReceiver } from "../interfaces/ILayerZeroReceiver.sol";
+import { ILayerZeroReceiver } from "contracts/external/layerzero/interfaces/ILayerZeroReceiver.sol";
 
 /// @title Cross chain rate receiver. By witherblock reference: https://github.com/witherblock/gyarados
 /// @notice Receives a rate from a provider contract on a different chain than the one this contract is deployed on

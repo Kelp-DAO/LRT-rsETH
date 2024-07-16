@@ -4,7 +4,7 @@ pragma solidity 0.8.21;
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-import { ILayerZeroEndpoint } from "../interfaces/ILayerZeroEndpoint.sol";
+import { ILayerZeroEndpoint } from "contracts/external/layerzero/interfaces/ILayerZeroEndpoint.sol";
 
 /// @title Cross chain rate provider. By witherblock reference: https://github.com/witherblock/gyarados
 /// @notice Provides a rate to a receiver contract on a different chain than the one this contract is deployed on
@@ -22,7 +22,7 @@ abstract contract CrossChainRateProvider is Ownable, ReentrancyGuard {
     /// @notice LayerZero endpoint address
     address public layerZeroEndpoint;
 
-    /// @notice Rate Reciever address address
+    /// @notice Rate Receiver address address
     address public rateReceiver;
 
     /// @notice Information of which token and base token rate is being provided
