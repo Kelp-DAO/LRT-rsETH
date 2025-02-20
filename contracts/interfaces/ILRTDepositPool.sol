@@ -13,6 +13,7 @@ interface ILRTDepositPool {
     error NodeDelegatorHasAssetBalance(address assetAddress, uint256 assetBalance);
     error NodeDelegatorHasETH();
     error EthTransferFailed();
+    error NodeDelegatorHasUnaccountedWithdrawals();
 
     //events
     event MaxNodeDelegatorLimitUpdated(uint256 maxNodeDelegatorLimit);
@@ -32,6 +33,8 @@ interface ILRTDepositPool {
     event EthTransferred(address to, uint256 amount);
 
     // functions
+    function depositETH(uint256 minRSETHAmountExpected, string calldata referralId) external payable;
+
     function depositAsset(
         address asset,
         uint256 depositAmount,
@@ -68,7 +71,7 @@ interface ILRTDepositPool {
         returns (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            uint256 assetStakedInEigenLayer,
+            int256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
@@ -80,7 +83,7 @@ interface ILRTDepositPool {
         returns (
             uint256 ethLyingInDepositPool,
             uint256 ethLyingInNDCs,
-            uint256 ethStakedInEigenLayer,
+            int256 ethStakedInEigenLayer,
             uint256 ethUnstakingFromEigenLayer,
             uint256 ethLyingInConverter,
             uint256 ethLyingInUnstakingVault

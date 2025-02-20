@@ -10,17 +10,17 @@
 
 ## 2. Deployed Native Restaking on L2
 ### From `https://github.com/Kelp-DAO/KelpDAO-contracts/` Repo
-- [ ] Check that `RSETHPoolV2` has been deployed.
-- [ ] Check if `RSETHPoolV2` is an upgradeable contract.
-- [ ] Check that `RSETHPoolV2`'s deposit function require native toke swap. If not set `isEthDepositEnabled` to `false`.
+- [ ] Check that `RSETHPoolV3` has been deployed.
+- [ ] Check if `RSETHPoolV3` is an upgradeable contract.
+- [ ] Check that `RSETHPoolV3`'s deposit function require native toke swap. If not set `isEthDepositEnabled` to `false`.
 - [ ] Check that `RsETHTokenWrapper` is deployed.
 - [ ] Check if `RsETHTokenWrapper` is an upgradeable contract.
-- [ ] Check MINTER_ROLE for `RSETHPoolV2` is properly set up on `RsETHTokenWrapper` contract.
+- [ ] Check MINTER_ROLE for `RSETHPoolV3` is properly set up on `RsETHTokenWrapper` contract.
 - [ ] Check if LZ_OFT address is a supported asset on `RsEthTokenWrapper` contract.
 - [ ] Check implementations of both contracts have the right bytecode.
 - [ ] Check the right proxy admin is set for both contracts.
 - [ ] Check that the owner of the proxy admin is L2 multisig or `0x7AAd74b7f0d60D5867B59dbD377a71783425af47`
-- [ ] Check that BRIDGER_ROLE is set for `RSETHPoolV2`. It should be `0x3924a9a1706285f5e92486dc19945e43fb2f98cf`.
+- [ ] Check that BRIDGER_ROLE is set for `RSETHPoolV3`. It should be `0x3924a9a1706285f5e92486dc19945e43fb2f98cf`.
 - [ ] Check that DEFAULT_ADMIN_ROLE is set to the L2 Kelp Multisig, `0x7AAd74b7f0d60D5867B59dbD377a71783425af47` or to `0x3924a9a1706285f5e92486dc19945e43fb2f98cf`.
 - [] Check that the contracts are verified.
 

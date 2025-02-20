@@ -2,7 +2,7 @@
 pragma solidity 0.8.21;
 
 import "./IStrategy.sol";
-import { IEigenDelegationManager } from "./IEigenDelegationManager.sol";
+import { IDelegationManager } from "./IDelegationManager.sol";
 import "./ISlasher.sol";
 
 interface IEigenStrategyManager {
@@ -51,7 +51,7 @@ interface IEigenStrategyManager {
         returns (bytes32);
 
     /// @notice Returns the single, central Delegation contract of EigenLayer
-    function delegation() external view returns (IEigenDelegationManager);
+    function delegation() external view returns (IDelegationManager);
 
     /**
      * @notice Called by a staker to queue a withdrawal of the given amount of `shares` from each of the respective

@@ -8,22 +8,32 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
 import { UtilLib } from "../utils/UtilLib.sol";
+import { IL2Messenger } from "contracts/interfaces/L2/IL2Messenger.sol";
 
 interface IOracle {
     function getRate() external view returns (uint256);
 }
 
-interface IERC20WstETH is IERC20Upgradeable {
+interface IERC20WrsETH is IERC20Upgradeable {
     function mint(address to, uint256 amount) external;
 }
 
+/// @title RSETHPoolV2
+/// @notice This contract is the pool for swapping ETH for rsETH
 contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuardUpgradeable {
-    IERC20WstETH public wrsETH;
+    IERC20WrsETH public wrsETH;
     uint256 public feeBps; // Basis points for fees
     uint256 public feeEarnedInETH;
     address public rsETHOracle;
 
     bytes32 public constant BRIDGER_ROLE = keccak256("BRIDGER_ROLE");
+
+    /// @notice The L2 bridge address
+    address public l2Bridge;
+    /// @notice The L1VaultETH for the L2 chain
+    address public l1VaultETHForL2Chain;
+    /// @notice The address of the messenger contract that abstracts the L2 bridge calls
+    address public messenger;
 
     error InvalidAmount();
     error TransferFailed();
@@ -31,12 +41,35 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
     event AssetsMovedForBridging(uint256 ethBalanceMinusFees);
+    event AssetsBridged(uint256 ethBalanceMinusFees);
     event FeeBpsSet(uint256 feeBps);
     event OracleSet(address oracle);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
+    }
+
+    /// @dev Reinitialize the contract
+    /// @param _l2Bridge The address of the L2 bridge
+    /// @param _l1VaultETHForL2Chain The address of the L1VaultETH for the L2 chain
+    /// @param _messenger The address of the messenger contract
+    function reinitialize(
+        address _l2Bridge,
+        address _l1VaultETHForL2Chain,
+        address _messenger
+    )
+        public
+        reinitializer(2)
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        UtilLib.checkNonZeroAddress(_l2Bridge);
+        UtilLib.checkNonZeroAddress(_l1VaultETHForL2Chain);
+        UtilLib.checkNonZeroAddress(_messenger);
+
+        l2Bridge = _l2Bridge;
+        l1VaultETHForL2Chain = _l1VaultETHForL2Chain;
+        messenger = _messenger;
     }
 
     /// @dev Initialize the contract
@@ -57,16 +90,14 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     {
         UtilLib.checkNonZeroAddress(_wrsETH);
         UtilLib.checkNonZeroAddress(_rsETHOracle);
-
         __ERC20_init("rsETH", "rsETH");
         __AccessControl_init();
         __ReentrancyGuard_init();
-
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _setupRole(BRIDGER_ROLE, admin);
         _setupRole(BRIDGER_ROLE, bridger);
 
-        wrsETH = IERC20WstETH(_wrsETH);
+        wrsETH = IERC20WrsETH(_wrsETH);
         feeBps = _feeBps;
         rsETHOracle = _rsETHOracle;
     }
@@ -122,7 +153,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         emit FeesWithdrawn(amountToSendInETH);
     }
 
-    /// @dev Withdraws assets from the contract for bridging
+    /// @dev Legacy function - Withdraws assets from the contract for bridging
     function moveAssetsForBridging() external onlyRole(BRIDGER_ROLE) {
         // withdraw ETH - fees
         uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
@@ -131,6 +162,18 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         if (!success) revert TransferFailed();
 
         emit AssetsMovedForBridging(ethBalanceMinusFees);
+    }
+
+    /// @dev Withdraws assets from the L2 to L1
+    function bridgeAssets() external onlyRole(BRIDGER_ROLE) {
+        // withdraw ETH - fees
+        uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
+
+        IL2Messenger(messenger).sendETHToL1ViaBridge{ value: ethBalanceMinusFees }(
+            l2Bridge, l1VaultETHForL2Chain, ethBalanceMinusFees
+        );
+
+        emit AssetsBridged(ethBalanceMinusFees);
     }
 
     /// @dev Sets the fee basis points
@@ -151,5 +194,13 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         rsETHOracle = _rsETHOracle;
 
         emit OracleSet(_rsETHOracle);
+    }
+
+    /// @dev Sets the l2Bridge address
+    /// @param _l2Bridge The l2Bridge address
+    function setL2Bridge(address _l2Bridge) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        UtilLib.checkNonZeroAddress(_l2Bridge);
+
+        l2Bridge = _l2Bridge;
     }
 }

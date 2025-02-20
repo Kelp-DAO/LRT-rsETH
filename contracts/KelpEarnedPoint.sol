@@ -19,6 +19,8 @@ contract KelpEarnedPoint is
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
+    mapping(address addr => bool isExempt) public isExemptFromPause;
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -61,12 +63,19 @@ contract KelpEarnedPoint is
 
     function _beforeTokenTransfer(
         address from,
-        address to,
-        uint256 amount
+        address,
+        uint256
     )
         internal
+        view
         override(ERC20Upgradeable, ERC20PausableUpgradeable)
     {
-        super._beforeTokenTransfer(from, to, amount);
+        if (paused()) {
+            require(isExemptFromPause[from], "Transfers are paused");
+        }
+    }
+
+    function setExemptFromPause(address addr, bool exempt) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        isExemptFromPause[addr] = exempt;
     }
 }

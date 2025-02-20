@@ -8,12 +8,12 @@ import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { IFeeReceiver } from "./interfaces/IFeeReceiver.sol";
 
 /// @title FeeReceiver
-/// @notice Recieves rewards and distributes it
-/// @dev also known as RewardReciever Contract in LRTContansts
+/// @notice Recieves Mev/Execution-layer rewards
+/// @dev also known as RewardReciever Contract in LRTConstants.sol
 contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
-    address public protocolTreasury;
+    address public _legacyProtocolTreasury;
     address public depositPool;
-    uint256 public protocolFeePercentInBPS;
+    uint256 public _legacyProtocolFeePercentInBPS;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -37,13 +37,11 @@ contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
             revert InvalidEmptyValue();
         }
 
-        protocolTreasury = _protocolTreasury;
+        _legacyProtocolTreasury = _protocolTreasury;
         depositPool = _depositPool;
-        protocolFeePercentInBPS = _protocolFeePercentInBPS;
+        _legacyProtocolFeePercentInBPS = _protocolFeePercentInBPS;
 
         __AccessControl_init();
-
-        // manager is both the default admin and the MANAGER role
         _setupRole(DEFAULT_ADMIN_ROLE, admin);
         _setupRole(LRTConstants.MANAGER, manager);
     }
@@ -51,33 +49,17 @@ contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
     /// @dev fallback to receive funds
     receive() external payable { }
 
-    /// @dev receive from NodeDelegator
-    function receiveFromNodeDelegator() external payable { }
-
-    /// @dev send percentage of the contract's balance to the fee receiver
+    /// @dev send all rewards to deposit pool
     function sendFunds() external {
         uint256 balance = address(this).balance;
-        uint256 amountToSendToProtocolTreasury = (balance * protocolFeePercentInBPS) / 10_000;
+        ILRTDepositPool(depositPool).receiveFromRewardReceiver{ value: balance }();
 
-        (bool success,) = protocolTreasury.call{ value: amountToSendToProtocolTreasury }("");
-        require(success, "FeeReceiver: failed to send to protocol treasury");
-
-        // send the remaining balance to the deposit pool
-        uint256 remainingAmount = address(this).balance;
-        ILRTDepositPool(depositPool).receiveFromRewardReceiver{ value: remainingAmount }();
+        emit MevRewardsAddedToTVL(balance);
     }
 
     /*//////////////////////////////////////////////////////////////
                             MANAGER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
-    /// @dev Set the fee receiver
-    /// @param _protocolTreasury Address of the fee receiver
-    function setProtocolTreasury(address _protocolTreasury) external onlyRole(LRTConstants.MANAGER) {
-        if (_protocolTreasury == address(0)) revert InvalidEmptyValue();
-
-        protocolTreasury = _protocolTreasury;
-    }
 
     /// @dev Set the deposit pool
     /// @param _depositPool Address of the deposit pool
@@ -85,12 +67,5 @@ contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
         if (_depositPool == address(0)) revert InvalidEmptyValue();
 
         depositPool = _depositPool;
-    }
-
-    /// @dev Set the percentage to send
-    /// @param _protocolFeePercentInBPS Percentage to send
-    function setProtocolFeePercentage(uint256 _protocolFeePercentInBPS) external onlyRole(LRTConstants.MANAGER) {
-        if (_protocolFeePercentInBPS == 0) revert InvalidEmptyValue();
-        protocolFeePercentInBPS = _protocolFeePercentInBPS;
     }
 }

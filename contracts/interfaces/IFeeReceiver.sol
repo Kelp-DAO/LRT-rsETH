@@ -5,6 +5,6 @@ interface IFeeReceiver {
     // Errors
     error InvalidEmptyValue();
 
-    // functions
-    function receiveFromNodeDelegator() external payable;
+    // events
+    event MevRewardsAddedToTVL(uint256 amount);
 }

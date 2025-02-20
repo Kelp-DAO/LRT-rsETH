@@ -8,11 +8,11 @@ import { DoubleEndedQueue } from "./utils/DoubleEndedQueue.sol";
 import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.sol";
 import { IRSETH } from "./interfaces/IRSETH.sol";
 import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
-import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
-import { ILRTWithdrawalManager, IStrategy, IERC20 } from "./interfaces/ILRTWithdrawalManager.sol";
+import { ILRTWithdrawalManager } from "./interfaces/ILRTWithdrawalManager.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
 
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -93,7 +93,8 @@ contract LRTWithdrawalManager is
     /// has past. There is an edge case were the user withdraws last underlying asset and that asset gets slashed.
     function initiateWithdrawal(
         address asset,
-        uint256 rsETHUnstaked
+        uint256 rsETHUnstaked,
+        string calldata referralId
     )
         external
         override
@@ -115,12 +116,22 @@ contract LRTWithdrawalManager is
         assetsCommitted[asset] += expectedAssetAmount;
 
         _addUserWithdrawalRequest(asset, rsETHUnstaked, expectedAssetAmount);
+
+        emit ReferralIdEmitted(referralId);
     }
 
     /// @notice Completes a user's withdrawal process by transferring the ETH/LST amount corresponding to the rsETH
     /// unstaked.
     /// @param asset The asset address the user wishes to withdraw.
-    function completeWithdrawal(address asset) external nonReentrant whenNotPaused onlySupportedAsset(asset) {
+    function completeWithdrawal(
+        address asset,
+        string calldata referralId
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        onlySupportedAsset(asset)
+    {
         // Retrieve and remove the oldest withdrawal request for the user.
         uint256 usersFirstWithdrawalRequestNonce = userAssociatedNonces[asset][msg.sender].popFront();
         // Ensure the request is already unlocked.
@@ -141,6 +152,7 @@ contract LRTWithdrawalManager is
             IERC20(asset).safeTransfer(msg.sender, request.expectedAssetAmount);
         }
 
+        emit ReferralIdEmitted(referralId);
         emit AssetWithdrawalFinalized(msg.sender, asset, request.rsETHUnstaked, request.expectedAssetAmount);
     }
 
@@ -157,7 +169,9 @@ contract LRTWithdrawalManager is
         address asset,
         uint256 firstExcludedIndex,
         uint256 minimumAssetPrice,
-        uint256 minimumRsEthPrice
+        uint256 minimumRsEthPrice,
+        uint256 maximumAssetPrice,
+        uint256 maximumRsEthPrice
     )
         external
         nonReentrant
@@ -167,27 +181,31 @@ contract LRTWithdrawalManager is
     {
         ILRTOracle lrtOracle = ILRTOracle(lrtConfig.getContract(LRTConstants.LRT_ORACLE));
         ILRTUnstakingVault unstakingVault = ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT));
-        uint256 rsETHPrice = lrtOracle.rsETHPrice();
-        uint256 assetPrice = lrtOracle.getAssetPrice(asset);
 
-        // Ensure the current prices meet or exceed the minimum required prices.
-        if (rsETHPrice < minimumRsEthPrice) revert RsETHPriceMustBeGreaterMinimum(rsETHPrice);
-        if (assetPrice < minimumAssetPrice) revert AssetPriceMustBeGreaterMinimum(assetPrice);
+        UnlockParams memory params = _createUnlockParams(lrtOracle, unstakingVault, asset, firstExcludedIndex);
 
-        uint256 totalAvailableAssets = unstakingVault.balanceOf(asset);
+        _validatePrices(
+            params.rsETHPrice,
+            params.assetPrice,
+            minimumRsEthPrice,
+            maximumRsEthPrice,
+            minimumAssetPrice,
+            maximumAssetPrice
+        );
 
-        if (totalAvailableAssets == 0) revert AmountMustBeGreaterThanZero();
+        if (params.totalAvailableAssets == 0) revert AmountMustBeGreaterThanZero();
 
         // Updates and unlocks withdrawal requests up to a specified upper limit or until allocated assets are fully
         // utilized.
-        (rsETHBurned, assetAmountUnlocked) =
-            _unlockWithdrawalRequests(asset, totalAvailableAssets, rsETHPrice, assetPrice, firstExcludedIndex);
+        (rsETHBurned, assetAmountUnlocked) = _unlockWithdrawalRequests(
+            asset, params.totalAvailableAssets, params.rsETHPrice, params.assetPrice, firstExcludedIndex
+        );
 
         if (rsETHBurned != 0) IRSETH(lrtConfig.rsETH()).burnFrom(address(this), rsETHBurned);
         //Take the amount to distribute from vault
         unstakingVault.redeem(asset, assetAmountUnlocked);
 
-        emit AssetUnlocked(asset, rsETHBurned, assetAmountUnlocked, rsETHPrice, assetPrice);
+        emit AssetUnlocked(asset, rsETHBurned, assetAmountUnlocked, params.rsETHPrice, params.assetPrice);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -204,10 +222,12 @@ contract LRTWithdrawalManager is
     }
 
     /// @notice update withdrawal delay
-    /// @dev only callable by LRT admin
+    /// @dev only callable by LRT manager
     /// @param withdrawalDelayBlocks_ The amount of blocks to wait till to complete a withdraw
-    function setWithdrawalDelayBlocks(uint256 withdrawalDelayBlocks_) external onlyLRTAdmin {
-        if (7 days / 12 seconds > withdrawalDelayBlocks_) revert WithdrawalDelayTooSmall();
+    function setWithdrawalDelayBlocks(uint256 withdrawalDelayBlocks_) external onlyLRTManager {
+        // Set an upper limit of no more than 10 days
+        if (withdrawalDelayBlocks_ > 10 days / 12 seconds) revert ExceedWithdrawalDelay();
+
         withdrawalDelayBlocks = withdrawalDelayBlocks_;
         emit WithdrawalDelayBlocksUpdated(withdrawalDelayBlocks);
     }
@@ -343,6 +363,9 @@ contract LRTWithdrawalManager is
             bytes32 requestId = getRequestId(asset, nextLockedNonce_);
             WithdrawalRequest storage request = withdrawalRequests[requestId];
 
+            // Check that the withdrawal delay has passed since the request's initiation.
+            if (block.number < request.withdrawalStartBlock + withdrawalDelayBlocks) break;
+
             // Calculate the amount user will recieve
             uint256 payoutAmount = _calculatePayoutAmount(request, rsETHPrice, assetPrice);
 
@@ -378,5 +401,42 @@ contract LRTWithdrawalManager is
     {
         uint256 currentReturn = (request.rsETHUnstaked * rsETHPrice) / assetPrice;
         return (request.expectedAssetAmount < currentReturn) ? request.expectedAssetAmount : currentReturn;
+    }
+
+    function _createUnlockParams(
+        ILRTOracle lrtOracle,
+        ILRTUnstakingVault unstakingVault,
+        address asset,
+        uint256 firstExcludedIndex
+    )
+        internal
+        view
+        returns (UnlockParams memory)
+    {
+        return UnlockParams({
+            rsETHPrice: lrtOracle.rsETHPrice(),
+            assetPrice: lrtOracle.getAssetPrice(asset),
+            totalAvailableAssets: unstakingVault.balanceOf(asset),
+            firstExcludedIndex: firstExcludedIndex
+        });
+    }
+
+    function _validatePrices(
+        uint256 rsETHPrice,
+        uint256 assetPrice,
+        uint256 minimumRsEthPrice,
+        uint256 maximumRsEthPrice,
+        uint256 minimumAssetPrice,
+        uint256 maximumAssetPrice
+    )
+        internal
+        pure
+    {
+        if (rsETHPrice < minimumRsEthPrice || rsETHPrice > maximumRsEthPrice) {
+            revert RsETHPriceOutOfPriceRange(rsETHPrice);
+        }
+        if (assetPrice < minimumAssetPrice || assetPrice > maximumAssetPrice) {
+            revert AssetPriceOutOfPriceRange(assetPrice);
+        }
     }
 }

@@ -6,6 +6,7 @@ import {
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { UtilLib } from "../utils/UtilLib.sol";
 
@@ -13,34 +14,55 @@ interface IOracle {
     function getRate() external view returns (uint256);
 }
 
-interface AggregatorV3Interface {
-    function decimals() external view returns (uint8);
-
-    function latestRoundData()
-        external
-        view
-        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
-}
-
+/// @title RSETHPool
+/// @notice This contract is the pool contract for the rsETH pool on *Arbitrum*
+/// @dev it differs from other RSETHPool contracts in other chains as it uses LZ_RSETH as the canonical rsETH token of
+/// the chain.
+/// @dev it was the first RSETHPool contract to be deployed in an L2 hence the  legacy variables
 contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuardUpgradeable {
-    IERC20Upgradeable public rsETH;
-    IERC20Upgradeable public wstETH;
+    using SafeERC20 for IERC20;
+
+    /// @custom:oz-renamed-from rsETH
+    IERC20Upgradeable public wrsETH;
+    /// @custom:oz-renamed-from wstETH
+    IERC20Upgradeable public legacyWstETH; // legacy variable
+
     uint256 public feeBps; // Basis points for fees
     uint256 public feeEarnedInETH;
-    uint256 public feeEarnedInWstETH;
-    address public rsETHOracle;
-    address public wstETH_ETHOracle;
+    /// @custom:oz-renamed-from feeEarnedInWstETH
+    uint256 public legacyFeeEarnedInWstETH; // legacy variable
 
-    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+    address public rsETHOracle;
+    /// @custom:oz-renamed-from wstETH_ETHOracle
+    address public legacyWstETH_ETHOracle; // legacy variable
+    /// @custom:oz-renamed-from MANAGER_ROLE
+    bytes32 public constant LEGACY_MANAGER_ROLE = keccak256("MANAGER_ROLE");
+
+    // new variables
+    bytes32 public constant BRIDGER_ROLE = keccak256("BRIDGER_ROLE");
+    bool public isEthDepositEnabled;
+    mapping(address token => uint256 feeEarned) public feeEarnedInToken;
+    mapping(address token => address oracle) public supportedTokenOracle;
+    address[] public supportedTokenList;
 
     error InvalidAmount();
     error TransferFailed();
+    error UnsupportedOracle();
+    error UnsupportedToken();
+    error AlreadySupportedToken();
+    error TokenNotFoundError();
+    error EthDepositDisabled();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
-    event FeesWithdrawn(uint256 feeEarnedInETH, uint256 feeEarnedInWstETH);
-    event CollectedAssetsWithdrawn(uint256 wwstETHBalanceMinusFees, uint256 ethBalanceMinusFees);
+    event FeesWithdrawn(uint256 feeEarnedInETH);
+    event FeesWithdrawn(uint256 feeEarnedInETH, address token);
+    event AssetsMovedForBridging(uint256 ethBalanceMinusFees);
+    event AssetsMovedForBridging(uint256 tokenBalanceMinusFees, address token);
     event FeeBpsSet(uint256 feeBps);
     event OracleSet(address oracle);
+    event AddSupportedToken(address token);
+    event RemovedSupportedToken(address token);
+    event IsEthDepositEnabled(bool isEthDepositEnabled);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -50,7 +72,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     /// @dev Initialize the contract
     /// @param admin The admin address
     /// @param manager The manager address
-    /// @param _rsETH The rsETH token address
+    /// @param _rsETH The canonical rsETH token address, LZ_RSETH on Arbitrum
     /// @param _wstETH The wstETH token address
     /// @param _feeBps The fee basis points
     /// @param _rsETHOracle The rsETHOracle address
@@ -75,14 +97,20 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         __ReentrancyGuard_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _setupRole(MANAGER_ROLE, admin);
-        _setupRole(MANAGER_ROLE, manager);
+        // legacy settings
+        _setupRole(LEGACY_MANAGER_ROLE, admin);
+        _setupRole(LEGACY_MANAGER_ROLE, manager);
 
-        rsETH = IERC20Upgradeable(_rsETH);
-        wstETH = IERC20Upgradeable(_wstETH);
+        wrsETH = IERC20Upgradeable(_rsETH);
+        legacyWstETH = IERC20Upgradeable(_wstETH);
         feeBps = _feeBps;
         rsETHOracle = _rsETHOracle;
-        wstETH_ETHOracle = _wstETH_ETHOracle;
+        legacyWstETH_ETHOracle = _wstETH_ETHOracle;
+    }
+
+    modifier onlySupportedToken(address token) {
+        if (supportedTokenOracle[token] == address(0)) revert UnsupportedToken();
+        _;
     }
 
     /// @dev Gets the rate from the rsETHOracle
@@ -90,60 +118,61 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         return IOracle(rsETHOracle).getRate();
     }
 
-    /// @dev Swaps ETH or wstETH for rsETH
-    /// @param wstETHAmount The amount of wstETH to swap for rsETH. Use 0 if swapping ETH for rsETH
-    function swapToRsETH(uint256 wstETHAmount, string calldata referralId) external payable nonReentrant {
-        bool isWstETH;
-        uint256 amount;
+    /// @dev Returns the list of supported tokens
+    function getSupportedTokens() external view returns (address[] memory) {
+        return supportedTokenList;
+    }
 
-        if (wstETHAmount > 0) {
-            if (msg.value > 0) revert InvalidAmount(); // cannot send both wstETH and ETH
-            isWstETH = true;
-            amount = wstETHAmount;
-            wstETH.transferFrom(msg.sender, address(this), wstETHAmount);
-        } else {
-            if (msg.value == 0) revert InvalidAmount();
-            amount = msg.value;
-        }
+    /// @dev Swaps ETH for rsETH
+    /// @param referralId The referral id
+    function deposit(string memory referralId) external payable nonReentrant {
+        if (!isEthDepositEnabled) revert EthDepositDisabled();
+        uint256 amount = msg.value;
 
-        (uint256 rsETHAmount, uint256 fee) = viewSwapRsETHAmountAndFee(amount, isWstETH);
+        if (amount == 0) revert InvalidAmount();
 
-        if (isWstETH) {
-            feeEarnedInWstETH += fee;
-        } else {
-            feeEarnedInETH += fee;
-        }
+        (uint256 rsETHAmount, uint256 fee) = viewSwapRsETHAmountAndFee(amount);
 
-        rsETH.transfer(msg.sender, rsETHAmount);
+        feeEarnedInETH += fee;
+
+        wrsETH.transfer(msg.sender, rsETHAmount);
 
         emit SwapOccurred(msg.sender, rsETHAmount, fee, referralId);
     }
 
-    /// @dev view function to get the rsETH amount for a given amount of wstETH or ETH
-    /// @param amount The amount of wstETH or ETH
-    /// @param isWstETH True if the amount is in wstETH, false if it is in ETH
+    /// @dev Swaps token for rsETH
+    /// @param token The token address
+    /// @param amount The amount of token
+    /// @param referralId The referral id
+    function deposit(
+        address token,
+        uint256 amount,
+        string memory referralId
+    )
+        external
+        nonReentrant
+        onlySupportedToken(token)
+    {
+        if (amount == 0) revert InvalidAmount();
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+
+        (uint256 rsETHAmount, uint256 fee) = viewSwapRsETHAmountAndFee(amount, token);
+
+        feeEarnedInToken[token] += fee;
+
+        wrsETH.transfer(msg.sender, rsETHAmount);
+
+        emit SwapOccurred(msg.sender, rsETHAmount, fee, referralId); // Add token address?
+    }
+
+    /// @dev view function to get the rsETH amount for a given amount of ETH
+    /// @param amount The amount of ETH
     /// @return rsETHAmount The amount of rsETH that will be received
     /// @return fee The fee that will be charged
-    function viewSwapRsETHAmountAndFee(
-        uint256 amount,
-        bool isWstETH
-    )
-        public
-        view
-        returns (uint256 rsETHAmount, uint256 fee)
-    {
+    function viewSwapRsETHAmountAndFee(uint256 amount) public view returns (uint256 rsETHAmount, uint256 fee) {
         fee = amount * feeBps / 10_000;
         uint256 amountAfterFee = amount - fee;
-
-        if (isWstETH) {
-            // Adjust for wstETH to ETH conversion using the oracle
-            (, int256 ETHPrice,,,) = AggregatorV3Interface(wstETH_ETHOracle).latestRoundData();
-
-            uint256 normalizedPriceForDecimalsUnit =
-                uint256(ETHPrice) * 1e18 / 10 ** uint256(AggregatorV3Interface(wstETH_ETHOracle).decimals());
-
-            amountAfterFee = amountAfterFee * normalizedPriceForDecimalsUnit / 1e18;
-        }
 
         // rate of rsETH in ETH
         uint256 rsETHToETHrate = getRate();
@@ -152,53 +181,81 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         rsETHAmount = amountAfterFee * 1e18 / rsETHToETHrate;
     }
 
+    /// @dev view function to get the rsETH amount for a given amount of token
+    /// @param amount The amount of token
+    /// @return rsETHAmount The amount of rsETH that will be received
+    /// @return fee The fee that will be charged
+    function viewSwapRsETHAmountAndFee(
+        uint256 amount,
+        address token
+    )
+        public
+        view
+        onlySupportedToken(token)
+        returns (uint256 rsETHAmount, uint256 fee)
+    {
+        fee = amount * feeBps / 10_000;
+        uint256 amountAfterFee = amount - fee;
+
+        // rate of rsETH in ETH
+        uint256 rsETHToETHrate = getRate();
+
+        // rate of token in ETH
+        uint256 tokenToETHRate = IOracle(supportedTokenOracle[token]).getRate();
+
+        // Calculate the final rsETH amount
+        rsETHAmount = amountAfterFee * tokenToETHRate / rsETHToETHrate;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             ACCESS RESTRICTED FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Withdraws fees earned by the pool
-    function withdrawFees(address receiver) external onlyRole(MANAGER_ROLE) {
+    function withdrawFees(address receiver) external onlyRole(BRIDGER_ROLE) {
         // withdraw fees in ETH
         uint256 amountToSendInETH = feeEarnedInETH;
         feeEarnedInETH = 0;
         (bool success,) = payable(receiver).call{ value: amountToSendInETH }("");
         if (!success) revert TransferFailed();
 
-        // withdraw fees in wstETH
-        uint256 amountToSendInWSETH = feeEarnedInWstETH;
-        feeEarnedInWstETH = 0;
-        wstETH.transfer(receiver, amountToSendInWSETH);
-
-        emit FeesWithdrawn(amountToSendInETH, amountToSendInWSETH);
+        emit FeesWithdrawn(amountToSendInETH);
     }
 
-    /// @dev Withdraws collected assets by the pool
-    function withdrawCollectedAssets(address receiver) external onlyRole(MANAGER_ROLE) {
-        // withdraw wstETH - fees
-        uint256 wstETHBalanceMinusFees = wstETH.balanceOf(address(this)) - feeEarnedInWstETH;
+    /// @dev Withdraws fees earned by the pool
+    function withdrawFees(address receiver, address token) external onlySupportedToken(token) onlyRole(BRIDGER_ROLE) {
+        // withdraw fees in ETH
+        uint256 amountToSendInToken = feeEarnedInToken[token];
+        feeEarnedInToken[token] = 0;
+        IERC20(token).safeTransfer(receiver, amountToSendInToken);
 
-        wstETH.transfer(receiver, wstETHBalanceMinusFees);
+        emit FeesWithdrawn(amountToSendInToken, token);
+    }
 
+    /// @dev Withdraws assets from the contract for bridging
+    function moveAssetsForBridging() external onlyRole(BRIDGER_ROLE) {
         // withdraw ETH - fees
         uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
 
-        (bool success,) = payable(receiver).call{ value: ethBalanceMinusFees }("");
+        (bool success,) = msg.sender.call{ value: ethBalanceMinusFees }("");
         if (!success) revert TransferFailed();
 
-        emit CollectedAssetsWithdrawn(wstETHBalanceMinusFees, ethBalanceMinusFees);
+        emit AssetsMovedForBridging(ethBalanceMinusFees);
     }
 
-    /// @dev withdraw rsETH from the pool
-    /// @dev This function is only callable by the manager
-    /// @param receiver The address to receive the rsETH
-    /// @param amount The amount of rsETH to withdraw
-    function withdrawRsETH(address receiver, uint256 amount) external onlyRole(MANAGER_ROLE) {
-        rsETH.transfer(receiver, amount);
+    /// @dev Withdraws assets from the contract for bridging
+    function moveAssetsForBridging(address token) external onlySupportedToken(token) onlyRole(BRIDGER_ROLE) {
+        // withdraw token - fees
+        uint256 tokenBalanceMinusFees = IERC20(token).balanceOf(address(this)) - feeEarnedInToken[token];
+
+        IERC20(token).safeTransfer(msg.sender, tokenBalanceMinusFees);
+
+        emit AssetsMovedForBridging(tokenBalanceMinusFees, token);
     }
 
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
-    function setFeeBps(uint256 _feeBps) external onlyRole(MANAGER_ROLE) {
+    function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_feeBps > 10_000) revert InvalidAmount();
 
         feeBps = _feeBps;
@@ -206,9 +263,16 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         emit FeeBpsSet(_feeBps);
     }
 
+    /// @dev Sets the isEthDepositEnabled flag
+    /// @param _isEthDepositEnabled The isEthDepositEnabled flag
+    function setIsEthDepositEnabled(bool _isEthDepositEnabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        isEthDepositEnabled = _isEthDepositEnabled;
+        emit IsEthDepositEnabled(_isEthDepositEnabled);
+    }
+
     /// @dev Sets the rsETHOracle address
     /// @param _rsETHOracle The rsETHOracle address
-    function setRSETHOracle(address _rsETHOracle) external onlyRole(MANAGER_ROLE) {
+    function setRSETHOracle(address _rsETHOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         UtilLib.checkNonZeroAddress(_rsETHOracle);
 
         rsETHOracle = _rsETHOracle;
@@ -216,13 +280,34 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         emit OracleSet(_rsETHOracle);
     }
 
-    /// @dev Sets the wstETH_ETHOracle address
-    /// @param _wstETH_ETHOracle The wstETH_ETHOracle address
-    function setWstETH_ETHOracle(address _wstETH_ETHOracle) external onlyRole(MANAGER_ROLE) {
-        UtilLib.checkNonZeroAddress(_wstETH_ETHOracle);
+    /// @dev Adds a supported token
+    /// @param token The token address
+    function addSupportedToken(address token, address oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        UtilLib.checkNonZeroAddress(token);
+        UtilLib.checkNonZeroAddress(oracle);
 
-        wstETH_ETHOracle = _wstETH_ETHOracle;
+        if (supportedTokenOracle[token] != address(0)) {
+            revert AlreadySupportedToken();
+        }
+        if (IOracle(rsETHOracle).getRate() == 0) {
+            revert UnsupportedOracle();
+        }
+        supportedTokenList.push(token);
+        supportedTokenOracle[token] = oracle;
 
-        emit OracleSet(_wstETH_ETHOracle);
+        emit AddSupportedToken(token);
+    }
+
+    /// @dev Removes a supported token
+    /// @param token The token address
+    function removeSupportedToken(address token, uint256 tokenIndex) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        UtilLib.checkNonZeroAddress(token);
+        if (supportedTokenList[tokenIndex] != token) {
+            revert TokenNotFoundError();
+        }
+        delete supportedTokenOracle[token];
+        supportedTokenList[tokenIndex] = supportedTokenList[supportedTokenList.length - 1];
+        supportedTokenList.pop();
+        emit RemovedSupportedToken(token);
     }
 }

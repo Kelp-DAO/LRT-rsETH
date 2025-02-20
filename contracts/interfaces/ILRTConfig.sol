@@ -38,4 +38,6 @@ interface ILRTConfig {
     function getSupportedAssetList() external view returns (address[] memory);
 
     function depositLimitByAsset(address asset) external view returns (uint256);
+
+    function protocolFeeInBPS() external view returns (uint256);
 }

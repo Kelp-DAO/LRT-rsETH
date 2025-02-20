@@ -8,6 +8,8 @@ import { ERC20PermitUpgradeable } from
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
+import { UtilLib } from "../utils/UtilLib.sol";
+
 /// @title RsETHTokenWrapper
 /// @notice This contract is a wrapper for alternative RsETH tokens in L2 chains for a canonical rsETH token for KelpDao
 /// @dev it is an upgradeable ERC20 token that wraps an alternative RsETH token
@@ -26,6 +28,7 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
 
     error TokenNotAllowed();
     error CannotDeposit();
+    error InsufficientBalance();
 
     event Deposit(address asset, address _sender, uint256 _amount);
     event Withdraw(address asset, address _sender, uint256 _amount);
@@ -133,8 +136,8 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
                            RESTRICTED ACCESS FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice deposit for when the rsETH is bridged by the bridger from L1
-    /// @notice so as to collateralize already minted wrsETH
+    /// @dev Legacy function - Deposit for when the rsETH is bridged by
+    /// the bridger from L1 so as to collateralize already minted wrsETH
     ///
     /// @param _asset The address of the token to deposit
     /// @param _amount The amount of tokens to deposit
@@ -146,6 +149,21 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
         ERC20Upgradeable(_asset).safeTransferFrom(msg.sender, address(this), _amount);
 
         emit BridgerDeposited(_asset, _amount);
+    }
+
+    /**
+     * @notice Move the altRsETH tokens to the pool
+     * @param _asset The address of the token to move
+     * @param _amount The amount of tokens to move
+     * @param _rsEthPool The address of the RsEthPool to move the tokens to
+     */
+    function moveWrsETHToPool(address _asset, uint256 _amount, address _rsEthPool) external onlyRole(MANAGER_ROLE) {
+        UtilLib.checkNonZeroAddress(_asset);
+        UtilLib.checkNonZeroAddress(_rsEthPool);
+
+        if (balanceOf(address(this)) < _amount) revert InsufficientBalance();
+
+        ERC20Upgradeable(_asset).safeTransfer(_rsEthPool, _amount);
     }
 
     /// Dont' allow to add other tokens at the moment. Only allow the altRsETH token as set in the initialize function
