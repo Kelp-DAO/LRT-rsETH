@@ -14,14 +14,14 @@ interface IOracle {
     function getRate() external view returns (uint256);
 }
 
-interface IERC20WstETH is IERC20Upgradeable {
+interface IERC20WrstETH is IERC20Upgradeable {
     function mint(address to, uint256 amount) external;
 }
 
 contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
 
-    IERC20WstETH public wrsETH;
+    IERC20WrstETH public wrsETH;
     uint256 public feeBps; // Basis points for fees
     uint256 public feeEarnedInETH;
     address public rsETHOracle;
@@ -89,7 +89,7 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         _setupRole(BRIDGER_ROLE, admin);
         _setupRole(BRIDGER_ROLE, bridger);
 
-        wrsETH = IERC20WstETH(_wrsETH);
+        wrsETH = IERC20WrstETH(_wrsETH);
         feeBps = _feeBps;
         rsETHOracle = _rsETHOracle;
         isEthDepositEnabled = true;

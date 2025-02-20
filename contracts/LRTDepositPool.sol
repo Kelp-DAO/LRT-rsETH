@@ -10,10 +10,12 @@ import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
 import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
-import { ILRTWithdrawalManager } from "./interfaces/ILRTWithdrawalManager.sol";
 import { ILRTConverter } from "./interfaces/ILRTConverter.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import { IDelegationManager } from "./external/eigenlayer/interfaces/IDelegationManager.sol";
+
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -146,7 +148,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     }
 
     /// @notice transfers asset lying in this DepositPool to node delegator contract
-    /// @dev only callable by LRT manager
+    /// @dev only callable by LRT Operator
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param asset Asset address
     /// @param amount Asset amount to transfer
@@ -157,7 +159,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     )
         external
         nonReentrant
-        onlyLRTManager
+        onlyLRTOperator
         onlySupportedAsset(asset)
     {
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
@@ -165,17 +167,17 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     }
 
     /// @notice transfers ETH lying in this DepositPool to node delegator contract
-    /// @dev only callable by LRT manager
+    /// @dev only callable by LRT Operator
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param amount ETH amount to transfer
-    function transferETHToNodeDelegator(uint256 ndcIndex, uint256 amount) external nonReentrant onlyLRTManager {
+    function transferETHToNodeDelegator(uint256 ndcIndex, uint256 amount) external nonReentrant onlyLRTOperator {
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
         INodeDelegator(nodeDelegator).sendETHFromDepositPoolToNDC{ value: amount }();
         emit EthTransferred(nodeDelegator, amount);
     }
 
     /// @notice transfers asset lying in this DepositPool to LRTUnstakingVault contract
-    /// @dev only callable by LRT manager
+    /// @dev only callable by LRT Operator
     /// @param asset Asset address
     /// @param amount Asset amount to transfer
     function transferAssetToLRTUnstakingVault(
@@ -184,7 +186,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     )
         external
         nonReentrant
-        onlyLRTManager
+        onlyLRTOperator
         onlySupportedAsset(asset)
     {
         address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
@@ -192,9 +194,9 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     }
 
     /// @notice transfers ETH lying in this DepositPool to nLRTUnstakingVault contract
-    /// @dev only callable by LRT manager
+    /// @dev only callable by LRT Operator
     /// @param amount ETH amount to transfer
-    function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant onlyLRTManager {
+    function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant onlyLRTOperator {
         address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
         ILRTUnstakingVault(lrtUnstakingVault).receiveFromLRTDepositPool{ value: amount }();
         emit EthTransferred(lrtUnstakingVault, amount);
@@ -315,14 +317,16 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            uint256 assetStakedInEigenLayer,
+            int256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
         ) = getAssetDistributionData(asset);
+        uint256 effectiveAssetWithEigenLayer =
+            SafeCast.toUint256(assetStakedInEigenLayer + SafeCast.toInt256(assetUnstakingFromEigenLayer));
         return (
-            assetLyingInDepositPool + assetLyingInNDCs + assetStakedInEigenLayer + assetUnstakingFromEigenLayer
-                + assetLyingInConverter + assetLyingUnstakingVault
+            assetLyingInDepositPool + assetLyingInNDCs + effectiveAssetWithEigenLayer + assetLyingInConverter
+                + assetLyingUnstakingVault
         );
     }
 
@@ -361,7 +365,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         returns (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            uint256 assetStakedInEigenLayer,
+            int256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
@@ -375,7 +379,10 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         uint256 ndcsCount = nodeDelegatorQueue.length;
         for (uint256 i; i < ndcsCount;) {
             assetLyingInNDCs += IERC20(asset).balanceOf(nodeDelegatorQueue[i]);
-            assetStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getAssetBalance(asset);
+            if (!INodeDelegator(nodeDelegatorQueue[i]).hasAllWithdrawalsAccounted()) {
+                revert NodeDelegatorHasUnaccountedWithdrawals();
+            }
+            assetStakedInEigenLayer += SafeCast.toInt256(INodeDelegator(nodeDelegatorQueue[i]).getAssetBalance(asset));
 
             unchecked {
                 ++i;
@@ -398,7 +405,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         returns (
             uint256 ethLyingInDepositPool,
             uint256 ethLyingInNDCs,
-            uint256 ethStakedInEigenLayer,
+            int256 ethStakedInEigenLayer,
             uint256 ethUnstakingFromEigenLayer,
             uint256 ethLyingInConverter,
             uint256 ethLyingInUnstakingVault
@@ -409,7 +416,10 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         uint256 ndcsCount = nodeDelegatorQueue.length;
         for (uint256 i; i < ndcsCount;) {
             ethLyingInNDCs += nodeDelegatorQueue[i].balance;
-            ethStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getETHEigenPodBalance();
+            if (!INodeDelegator(nodeDelegatorQueue[i]).hasAllWithdrawalsAccounted()) {
+                revert NodeDelegatorHasUnaccountedWithdrawals();
+            }
+            ethStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getEffectivePodShares();
             unchecked {
                 ++i;
             }
@@ -508,12 +518,13 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         revert NodeDelegatorNotFound();
     }
 
-    /// @dev reverts if NDC has native ETH balance in eigen layer or/and in itself.
+    /// @dev reverts if NDC has native ETH balance in eigen layer or in itself.
     function _checkResidueEthBalance(address nodeDelegatorAddress) internal view {
-        uint256 ndcEthBalance =
-            INodeDelegator(nodeDelegatorAddress).getETHEigenPodBalance() + address(nodeDelegatorAddress).balance;
-
-        if (ndcEthBalance > maxNegligibleAmount) {
+        if (
+            INodeDelegator(nodeDelegatorAddress).stakedButUnverifiedNativeETH() > 0
+                || INodeDelegator(nodeDelegatorAddress).getEffectivePodShares() != 0
+                || address(nodeDelegatorAddress).balance > maxNegligibleAmount
+        ) {
             revert NodeDelegatorHasETH();
         }
     }

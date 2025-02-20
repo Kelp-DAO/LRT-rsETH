@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.21;
 
-import { IStrategy } from "contracts/external/eigenlayer/interfaces/IStrategy.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
 interface ILRTWithdrawalManager {
     //errors
     error TokenTransferFailed();
@@ -12,13 +9,20 @@ interface ILRTWithdrawalManager {
     error ExceedAmountToWithdraw();
     error WithdrawalLocked();
     error WithdrawalDelayNotPassed();
-    error WithdrawalDelayTooSmall();
+    error ExceedWithdrawalDelay();
     error NoPendingWithdrawals();
     error AmountMustBeGreaterThanZero();
     error StrategyNotSupported();
 
-    error RsETHPriceMustBeGreaterMinimum(uint256 rsEthPrice);
-    error AssetPriceMustBeGreaterMinimum(uint256 assetPrice);
+    error RsETHPriceOutOfPriceRange(uint256 rsEthPrice);
+    error AssetPriceOutOfPriceRange(uint256 assetPrice);
+
+    struct UnlockParams {
+        uint256 rsETHPrice;
+        uint256 assetPrice;
+        uint256 totalAvailableAssets;
+        uint256 firstExcludedIndex;
+    }
 
     struct WithdrawalRequest {
         uint256 rsETHUnstaked;
@@ -43,6 +47,8 @@ interface ILRTWithdrawalManager {
     event MinAmountToWithdrawUpdated(address asset, uint256 minRsEthAmountToWithdraw);
     event WithdrawalDelayBlocksUpdated(uint256 withdrawalDelayBlocks);
 
+    event ReferralIdEmitted(string referralId);
+
     // methods
 
     function getExpectedAssetAmount(address asset, uint256 amount) external view returns (uint256);
@@ -58,15 +64,17 @@ interface ILRTWithdrawalManager {
         view
         returns (uint256 rsETHAmount, uint256 expectedAssetAmount, uint256 withdrawalStartBlock, uint256 userNonce);
 
-    function initiateWithdrawal(address asset, uint256 withdrawAmount) external;
+    function initiateWithdrawal(address asset, uint256 withdrawAmount, string calldata referralId) external;
 
-    function completeWithdrawal(address asset) external;
+    function completeWithdrawal(address asset, string calldata referralId) external;
 
     function unlockQueue(
         address asset,
         uint256 index,
         uint256 minimumAssetPrice,
-        uint256 minimumRsEthPrice
+        uint256 minimumRsEthPrice,
+        uint256 maximumAssetPrice,
+        uint256 maximumRsEthPrice
     )
         external
         returns (uint256 rsETHBurned, uint256 assetAmountUnlocked);

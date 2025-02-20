@@ -19,8 +19,8 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     mapping(address token => address strategy) public override assetStrategy;
 
     address[] public supportedAssetList;
-
     address public rsETH;
+    uint256 public protocolFeeInBPS;
 
     modifier onlySupportedAsset(address asset) {
         if (!isSupportedAsset[asset]) {
@@ -148,6 +148,13 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     /*//////////////////////////////////////////////////////////////
                             SETTERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Set the protocol fee bps
+    /// @param _protocolFeeInBPS protocol fee bps
+    function setProtocolFeeBps(uint256 _protocolFeeInBPS) external onlyRole(LRTConstants.DEFAULT_ADMIN_ROLE) {
+        protocolFeeInBPS = _protocolFeeInBPS;
+    }
+
     /// @dev Sets the rsETH contract address. Only callable by the admin
     /// @param rsETH_ rsETH contract address
     function setRSETH(address rsETH_) external onlyRole(DEFAULT_ADMIN_ROLE) {

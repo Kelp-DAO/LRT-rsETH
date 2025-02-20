@@ -2,20 +2,16 @@
 pragma solidity 0.8.21;
 
 // openzeppelin or other standard contracts
-import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 // external libraries, interfaces, contracts
-import { BeaconChainProofs } from "./external/eigenlayer/libraries/BeaconChainProofs.sol";
-
-import { IEigenPod, IBeaconDeposit } from "./external/eigenlayer/interfaces/IEigenPod.sol";
-import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
+import { IEigenPod } from "./external/eigenlayer/interfaces/IEigenPod.sol";
 import { IEigenStrategyManager } from "./external/eigenlayer/interfaces/IEigenStrategyManager.sol";
-import { IEigenPodManager } from "./external/eigenlayer/interfaces/IEigenPodManager.sol";
-import { IEigenDelegationManager } from "./external/eigenlayer/interfaces/IEigenDelegationManager.sol";
-import { IEigenDelayedWithdrawalRouter } from "./external/eigenlayer/interfaces/IEigenDelayedWithdrawalRouter.sol";
+import { IEigenPodManager, IETHPOSDeposit } from "./external/eigenlayer/interfaces/IEigenPodManager.sol";
+import { IDelegationManager } from "./external/eigenlayer/interfaces/IDelegationManager.sol";
 
 // protocol libraries, interfaces, contracts
 import { UtilLib } from "./utils/UtilLib.sol";
@@ -23,10 +19,10 @@ import { LRTConstants } from "./utils/LRTConstants.sol";
 import { LRTConfigRoleChecker } from "./utils/LRTConfigRoleChecker.sol";
 
 import { ILRTConfig } from "./interfaces/ILRTConfig.sol";
-import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
+import { IPubkeyRegistry } from "./interfaces/IPubkeyRegistry.sol";
+import { INodeDelegator, BeaconChainProofs, IERC20, IStrategy } from "./interfaces/INodeDelegator.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
-import { IFeeReceiver } from "./interfaces/IFeeReceiver.sol";
 
 /// @title NodeDelegator Contract
 /// @notice The contract that handles the depositing of assets into strategies
@@ -42,10 +38,19 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
     /// @dev address of eigenlayer operator to which all restaked funds are delegated to
     /// @dev it is only possible to delegate fully to only one operator per NDC contract
-    address public elOperatorDelegatedTo;
+    address private __elOperatorDelegatedTo;
 
     /// @dev amount of eth expected to receive from extra eth staked for validators
-    uint256 public extraStakeToReceive;
+    uint256 private __legacyExtraStakeToReceive;
+
+    uint256 private lastNonce;
+
+    modifier onlyWhenWithdrawalsAccounted() {
+        if (!hasAllWithdrawalsAccounted()) {
+            revert ForcedOperatorUndelegation();
+        }
+        _;
+    }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -63,20 +68,13 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         emit UpdatedLRTConfig(lrtConfigAddr);
     }
 
+    function initialize2() external reinitializer(2) {
+        lastNonce = getNonce();
+    }
+
     /// @dev due to a bit heavy logic, eth transfer using `transfer()` and `send()` will fail
     /// @dev hence please use `call()` to send eth to this contract
     receive() external payable {
-        if (msg.sender != address(eigenPod)) {
-            // then these are extraStakes or rewards
-            uint256 extraStakeReceived = UtilLib.getMin(msg.value, extraStakeToReceive);
-            _reduceExtraStakes(extraStakeReceived);
-
-            // rest are rewards
-            _sendRewardsToRewardReceiver(msg.value - extraStakeReceived);
-        }
-        // else if received from eigenPod
-        // then these are assumed to be exit validators' eth
-        // just receive it here
         emit ETHReceived(msg.sender, msg.value);
     }
 
@@ -117,36 +115,30 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @dev delegationManager.delegateTo will check if the operator is valid, if ndc is already delegated to
     function delegateTo(
         address elOperator,
-        IEigenDelegationManager.SignatureWithExpiry memory approverSignatureAndExpiry,
+        IDelegationManager.SignatureWithExpiry memory approverSignatureAndExpiry,
         bytes32 approverSalt
     )
         external
         onlyLRTManager
     {
         UtilLib.checkNonZeroAddress(elOperator);
-        elOperatorDelegatedTo = elOperator;
-
-        IEigenDelegationManager elDelegationManager =
-            IEigenDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
-        elDelegationManager.delegateTo(elOperator, approverSignatureAndExpiry, approverSalt);
+        IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER)).delegateTo(
+            elOperator, approverSignatureAndExpiry, approverSalt
+        );
         emit ElSharesDelegated(elOperator);
     }
 
+    /**
+     * @notice Creates an EigenPod for this NodeDelegator.
+     * @dev Function will revert if the `NodeDelegator` already has an EigenPod.
+     * @dev Sets EigenPod address
+     */
     function createEigenPod() external onlyLRTManager {
         IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
-        eigenPodManager.createPod();
-        eigenPod = eigenPodManager.ownerToPod(address(this));
+
+        eigenPod = IEigenPod(eigenPodManager.createPod());
 
         emit EigenPodCreated(address(eigenPod), address(this));
-    }
-
-    /// @dev activates eigenPod, i.e. enables all M2 functions
-    /// restricts execution of few functions, check `hasEnabledRestaking` modifier in EigenPod
-    /// NOTE: creates a delayedWithdrawal for the eth accumulated on eigenPod (skimmed from beacon chain)
-    /// NOTE: newly created M2 pods are already activated
-    function activateRestaking() external onlyLRTManager {
-        eigenPod.activateRestaking();
-        emit RestakingActivated();
     }
 
     /// @notice Stake ETH from NDC into EigenLayer. it calls the stake function in the EigenPodManager
@@ -162,16 +154,26 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         bytes calldata signature,
         bytes32 depositDataRoot
     )
-        external
+        public
         whenNotPaused
         onlyLRTOperator
     {
+        IPubkeyRegistry pubkeyRegistry = IPubkeyRegistry(lrtConfig.getContract(LRTConstants.PUBKEY_REGISTRY));
+        if (pubkeyRegistry.hasPubkey(pubkey)) {
+            revert PubkeyAlreadyRegistered();
+        }
+        pubkeyRegistry.addPubkey(pubkey);
+
         // tracks staked but unverified native ETH
         stakedButUnverifiedNativeETH += 32 ether;
 
         IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
         eigenPodManager.stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
 
+        if (address(eigenPod) == address(0)) {
+            eigenPod = eigenPodManager.ownerToPod(address(this));
+            emit EigenPodCreated(address(eigenPod), address(this));
+        }
         emit ETHStaked(pubkey, 32 ether);
     }
 
@@ -194,38 +196,34 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         whenNotPaused
         onlyLRTOperator
     {
-        IBeaconDeposit depositContract = eigenPod.ethPOS();
+        IETHPOSDeposit depositContract =
+            IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER)).ethPOS();
         bytes32 actualDepositRoot = depositContract.get_deposit_root();
         if (expectedDepositRoot != actualDepositRoot) {
             revert InvalidDepositRoot(expectedDepositRoot, actualDepositRoot);
         }
-
-        // tracks staked but unverified native ETH
-        stakedButUnverifiedNativeETH += 32 ether;
-
-        IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
-        eigenPodManager.stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
-
-        emit ETHStaked(pubkey, 32 ether);
+        stake32Eth(pubkey, signature, depositDataRoot);
     }
 
     /**
-     * @notice This function verifies that the withdrawal credentials of validator(s) owned by the this NDC are pointed
-     * to EigenPod. It also verifies the effective balance of the validator.  It verifies the provided proof of the
-     * ETH validator against the beacon chain state root, marks the validator as 'active' in EigenLayer, and credits the
-     * restaked ETH in Eigenlayer.
-     * @param oracleTimestamp is the Beacon Chain timestamp whose state root the `proof` will be proven against.
-     * @param validatorIndices is the list of indices of the validators being proven, refer to consensus specs
-     * @param withdrawalCredentialProofs is an array of proofs, where each proof proves each ETH validator's balance and
-     * withdrawal credentials against a beacon chain state root
-     * @param validatorFields are the fields of the "Validator Container", refer to consensus specs
-     * for details: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#validator
+     * @dev Verify one or more validators have their withdrawal credentials pointed at this EigenPod, and award
+     * shares based on their effective balance. Proven validators are marked `ACTIVE` within the EigenPod, and
+     * future checkpoint proofs will need to include them.
+     * @dev Withdrawal credential proofs MUST NOT be older than `currentCheckpointTimestamp`.
+     * @dev Validators proven via this method MUST NOT have an exit epoch set already.
+     * @param beaconTimestamp the beacon chain timestamp sent to the 4788 oracle contract. Corresponds
+     * to the parent beacon block root against which the proof is verified.
+     * @param stateRootProof proves a beacon state root against a beacon block root
+     * @param validatorIndices a list of validator indices being proven
+     * @param validatorFieldsProofs proofs of each validator's `validatorFields` against the beacon state root
+     * @param validatorFields the fields of the beacon chain "Validator" container. See consensus specs for
+     * details: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#validator
      */
     function verifyWithdrawalCredentials(
-        uint64 oracleTimestamp,
+        uint64 beaconTimestamp,
         BeaconChainProofs.StateRootProof calldata stateRootProof,
         uint40[] calldata validatorIndices,
-        bytes[] calldata withdrawalCredentialProofs,
+        bytes[] calldata validatorFieldsProofs,
         bytes32[][] calldata validatorFields
     )
         external
@@ -235,16 +233,30 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         stakedButUnverifiedNativeETH -= (validatorFields.length * (32 ether));
 
         eigenPod.verifyWithdrawalCredentials(
-            oracleTimestamp, stateRootProof, validatorIndices, withdrawalCredentialProofs, validatorFields
+            beaconTimestamp, stateRootProof, validatorIndices, validatorFieldsProofs, validatorFields
         );
+    }
+
+    /**
+     * @dev Create a checkpoint used to prove this pod's active validator set. Checkpoints are completed
+     * by submitting one checkpoint proof per ACTIVE validator. During the checkpoint process, the total
+     * change in ACTIVE validator balance is tracked, and any validators with 0 balance are marked `WITHDRAWN`.
+     * @dev Once finalized, the pod owner is awarded shares corresponding to:
+     * - the total change in their ACTIVE validator balances
+     * - any ETH in the pod not already awarded shares
+     * @dev A checkpoint cannot be created if the pod already has an outstanding checkpoint. If
+     * this is the case, the pod owner MUST complete the existing checkpoint before starting a new one.
+     * @param revertIfNoBalance Forces a revert if the pod ETH balance is 0. This allows the pod owner
+     * to prevent accidentally starting a checkpoint that will not increase their shares
+     */
+    function startCheckpoint(bool revertIfNoBalance) external onlyLRTOperator {
+        eigenPod.startCheckpoint(revertIfNoBalance);
     }
 
     /// @notice undelegates from operator and removes all currently active shares
     function undelegate() external whenNotPaused onlyLRTManager {
-        elOperatorDelegatedTo = address(0);
-
-        IEigenDelegationManager elDelegationManager =
-            IEigenDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
+        IDelegationManager elDelegationManager =
+            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
         ILRTUnstakingVault lrtUnstakingVault =
             ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT));
         address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
@@ -266,9 +278,12 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
             }
         }
 
-        uint256 nonce = elDelegationManager.cumulativeWithdrawalsQueued(address(this));
+        uint256 nonce = getNonce();
         bytes32[] memory withdrawalRoots = elDelegationManager.undelegate(address(this));
-
+        lastNonce = lastNonce + getNonce() - nonce;
+        for (uint256 i = 0; i < withdrawalRoots.length; i++) {
+            lrtUnstakingVault.trackWithdrawal(withdrawalRoots[i]);
+        }
         emit WithdrawalQueued(nonce, address(this), withdrawalRoots);
         emit Undelegated();
     }
@@ -280,14 +295,14 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         IStrategy[] calldata strategies,
         uint256[] calldata shares
     )
-        public
+        external
         override
         nonReentrant
         whenNotPaused
         onlyLRTOperator
         returns (bytes32 withdrawalRoot)
     {
-        IEigenDelegationManager.QueuedWithdrawalParams memory queuedWithdrawalParam = IEigenDelegationManager
+        IDelegationManager.QueuedWithdrawalParams memory queuedWithdrawalParam = IDelegationManager
             .QueuedWithdrawalParams({ strategies: strategies, shares: shares, withdrawer: address(this) });
 
         address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
@@ -311,16 +326,17 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
                 ++i;
             }
         }
-        address elDelegationManagerAddr = lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER);
-        IEigenDelegationManager elDelegationManager = IEigenDelegationManager(elDelegationManagerAddr);
+        IDelegationManager elDelegationManager =
+            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
 
-        IEigenDelegationManager.QueuedWithdrawalParams[] memory queuedWithdrawalParams =
-            new IEigenDelegationManager.QueuedWithdrawalParams[](1);
+        IDelegationManager.QueuedWithdrawalParams[] memory queuedWithdrawalParams =
+            new IDelegationManager.QueuedWithdrawalParams[](1);
         queuedWithdrawalParams[0] = queuedWithdrawalParam;
-        uint256 nonce = elDelegationManager.cumulativeWithdrawalsQueued(address(this));
+        uint256 nonce = getNonce();
         bytes32[] memory withdrawalRoots = elDelegationManager.queueWithdrawals(queuedWithdrawalParams);
+        lastNonce = lastNonce + 1;
         withdrawalRoot = withdrawalRoots[0];
-
+        lrtUnstakingVault.trackWithdrawal(withdrawalRoot);
         emit WithdrawalQueued(nonce, address(this), withdrawalRoots);
     }
 
@@ -329,14 +345,32 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @param assets Array specifying the `token` input for each strategy's 'withdraw' function.
     /// @param middlewareTimesIndex Index in the middleware times array for withdrawal eligibility check.
     function completeUnstaking(
-        IEigenDelegationManager.Withdrawal calldata withdrawal,
+        IDelegationManager.Withdrawal calldata withdrawal,
         IERC20[] calldata assets,
         uint256 middlewareTimesIndex
     )
         external
+    {
+        completeUnstaking(withdrawal, assets, middlewareTimesIndex, true);
+    }
+
+    /// @notice Finalizes Eigenlayer withdrawal to enable processing of queued withdrawals
+    /// @param withdrawal Struct containing all data for the withdrawal
+    /// @param assets Array specifying the `token` input for each strategy's 'withdraw' function.
+    /// @param middlewareTimesIndex Index in the middleware times array for withdrawal eligibility check.
+    /// @param receiveAsTokens Whether or not to complete each withdrawal as tokens. See `completeQueuedWithdrawal` for
+    /// the usage of a single boolean.
+    function completeUnstaking(
+        IDelegationManager.Withdrawal calldata withdrawal,
+        IERC20[] calldata assets,
+        uint256 middlewareTimesIndex,
+        bool receiveAsTokens
+    )
+        public
         nonReentrant
         whenNotPaused
         onlyLRTOperator
+        onlyWhenWithdrawalsAccounted
     {
         uint256 assetCount = assets.length;
         if (assetCount == 0 || assetCount != withdrawal.shares.length) {
@@ -352,11 +386,17 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
         uint256[] memory balancesBefore = new uint256[](assetCount);
         for (uint256 i = 0; i < assetCount;) {
-            lrtUnstakingVault.reduceSharesUnstaking(address(assets[i]), withdrawal.shares[i]);
             if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
-                balancesBefore[i] = assets[i].balanceOf(address(this));
+                lrtUnstakingVault.reduceSharesUnstaking(address(assets[i]), withdrawal.shares[i]);
             } else {
-                balancesBefore[i] = address(this).balance;
+                lrtUnstakingVault.reduceSharesUnstaking(LRTConstants.ETH_TOKEN, withdrawal.shares[i]);
+            }
+            if (receiveAsTokens) {
+                if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
+                    balancesBefore[i] = assets[i].balanceOf(address(this));
+                } else {
+                    balancesBefore[i] = address(this).balance;
+                }
             }
             unchecked {
                 i++;
@@ -364,38 +404,22 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         }
 
         // Finalize withdrawal with Eigenlayer Delegation Manager
-        IEigenDelegationManager(elDelegationManagerAddr).completeQueuedWithdrawal(
-            withdrawal, assets, middlewareTimesIndex, true
+        IDelegationManager(elDelegationManagerAddr).completeQueuedWithdrawal(
+            withdrawal, assets, middlewareTimesIndex, receiveAsTokens
         );
-
-        for (uint256 i = 0; i < assetCount;) {
-            if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
-                uint256 amount = assets[i].balanceOf(address(this)) - balancesBefore[i];
-                assets[i].transfer(lrtUnstakingVaultAddr, amount);
-            }
-            unchecked {
-                i++;
+        if (receiveAsTokens) {
+            for (uint256 i = 0; i < assetCount;) {
+                if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
+                    uint256 amount = assets[i].balanceOf(address(this)) - balancesBefore[i];
+                    assets[i].transfer(lrtUnstakingVaultAddr, amount);
+                }
+                unchecked {
+                    i++;
+                }
             }
         }
+
         emit EigenLayerWithdrawalCompleted(withdrawal.staker, withdrawal.nonce, msg.sender);
-    }
-
-    /// @notice initiate a delayed withdraw of ETH available at eigenPod
-    /// @dev this eth will be available to claim after withdrawalDelay blocks
-    /// @dev this method will be deprecated once eigenPod is activated
-    /// TODO: remove this function after eigenPod activation
-    function withdrawBeforeRestaking() external onlyLRTOperator {
-        eigenPod.withdrawBeforeRestaking();
-    }
-
-    /// @notice claim delayed withdrawal entries (rewards + extraStakes)
-    /// @param maxNumberOfDelayedWithdrawalsToClaim the max number of delayed withdrawals to claim
-    /// @dev available to claim after a waiting period of withdrawalBlockDelay set by eigenLayer
-    /// @dev permissionless call
-    function claimDelayedWithdrawals(uint256 maxNumberOfDelayedWithdrawalsToClaim) external {
-        address delayedRouterAddr = eigenPod.delayedWithdrawalRouter();
-        IEigenDelayedWithdrawalRouter elDelayedRouter = IEigenDelayedWithdrawalRouter(delayedRouterAddr);
-        elDelayedRouter.claimDelayedWithdrawals(address(this), maxNumberOfDelayedWithdrawalsToClaim);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -405,12 +429,20 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @notice Sends ETH from the LRT deposit pool to this contract
     function sendETHFromDepositPoolToNDC() external payable override {
         // only allow LRT deposit pool to send ETH to this contract
-        address lrtDepositPool = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
-        if (msg.sender != lrtDepositPool) {
+        if (msg.sender != lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL)) {
             revert InvalidETHSender();
         }
 
         emit ETHDepositFromDepositPool(msg.value);
+    }
+
+    /// @notice Sends ETH from the LRT Unstaking Vault to this contract
+    function sendETHFromUnstakingVaultToNDC() external payable override {
+        // only allow LRT deposit pool to send ETH to this contract
+        if (msg.sender != lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)) {
+            revert InvalidETHSender();
+        }
+        emit ETHDepositFromUnstakingVault(msg.value);
     }
 
     /// @notice Transfers an asset back to the LRT deposit pool
@@ -425,7 +457,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         nonReentrant
         whenNotPaused
         onlySupportedAsset(asset)
-        onlyLRTManager
+        onlyLRTOperator
     {
         address lrtDepositPool = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
 
@@ -440,7 +472,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @notice Transfers ETH back to the LRT Unstaking Vault
     /// @dev only supported assets can be transferred and only called by the LRT manager
     /// @param amount the amount to transfer
-    function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant whenNotPaused onlyLRTManager {
+    function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant whenNotPaused onlyLRTOperator {
         address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
         ILRTUnstakingVault(lrtUnstakingVault).receiveFromNodeDelegator{ value: amount }();
         emit EthTransferred(lrtUnstakingVault, amount);
@@ -467,16 +499,6 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
                     Setters / Update Functions
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev increments the amount of eth expected to receive from extra eth staked for validators
-    /// @param amount the amount to increment
-    function incrementExtraStakeToReceive(uint256 amount) external onlyLRTOperator {
-        extraStakeToReceive += amount;
-        if (extraStakeToReceive > stakedButUnverifiedNativeETH) {
-            revert InsufficientStakedButUnverifiedNativeETH();
-        }
-        emit ETHExtraStakeToReceiveIncremented(amount);
-    }
-
     /// @dev Triggers stopped state. Contract must not be paused.
     function pause() external onlyLRTManager {
         _pause();
@@ -487,35 +509,27 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         _unpause();
     }
 
+    function increaseLastNonce() external override {
+        if (lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT) != msg.sender) {
+            revert CallerNotLRTUnstakingVault();
+        }
+        lastNonce = lastNonce + 1;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             View Functions
     //////////////////////////////////////////////////////////////*/
+    function hasAllWithdrawalsAccounted() public view override returns (bool) {
+        return (getNonce() == lastNonce);
+    }
 
     /// @notice Fetches balance of all assets staked in eigen layer through this contract
     /// @return assets the assets that the node delegator has deposited into strategies
     /// @return assetBalances the balances of the assets that the node delegator has deposited into strategies
-    function getAssetBalances()
-        external
-        view
-        override
-        returns (address[] memory assets, uint256[] memory assetBalances)
-    {
-        address eigenlayerStrategyManagerAddress = lrtConfig.getContract(LRTConstants.EIGEN_STRATEGY_MANAGER);
-
-        (IStrategy[] memory strategies,) =
-            IEigenStrategyManager(eigenlayerStrategyManagerAddress).getDeposits(address(this));
-
-        uint256 strategiesLength = strategies.length;
-        assets = new address[](strategiesLength);
-        assetBalances = new uint256[](strategiesLength);
-
-        for (uint256 i = 0; i < strategiesLength;) {
-            assets[i] = address(IStrategy(strategies[i]).underlyingToken());
-            assetBalances[i] = IStrategy(strategies[i]).userUnderlyingView(address(this));
-            unchecked {
-                ++i;
-            }
-        }
+    function getAssetBalances() external view override returns (address[] memory, uint256[] memory) {
+        return ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)).getStakedAssetBalances(
+            address(this)
+        );
     }
 
     /// @dev Returns the balance of an asset that the node delegator has deposited into the strategy
@@ -531,40 +545,21 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     }
 
     /// @dev Returns the amount of eth staked in eigenlayer through this ndc
-    function getETHEigenPodBalance() external view override returns (uint256 ethStaked) {
-        IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
-        int256 nativeEthShares = eigenPodManager.podOwnerShares(address(this));
+    function getEffectivePodShares() external view override returns (int256 ethStaked) {
+        int256 nativeEthShares =
+            IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER)).podOwnerShares(address(this));
 
-        if (nativeEthShares < 0) {
-            // native eth shares are negative due to slashing and queue of more amount of eth withdrawal
-            uint256 nativeEthSharesDeficit = uint256(-nativeEthShares);
-            if (nativeEthSharesDeficit > stakedButUnverifiedNativeETH) {
-                return 0;
-            } else {
-                return stakedButUnverifiedNativeETH - nativeEthSharesDeficit;
-            }
-        }
-
-        return stakedButUnverifiedNativeETH + uint256(nativeEthShares);
+        // if the below sum becomes negative, it will be balanced by sharesUnstaking when computing total TVL
+        return SafeCast.toInt256(stakedButUnverifiedNativeETH) + nativeEthShares;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                            internal functions
-    //////////////////////////////////////////////////////////////*/
-
-    function _reduceExtraStakes(uint256 extraStakeReceived) internal {
-        if (extraStakeReceived <= 0) return;
-
-        extraStakeToReceive -= extraStakeReceived;
-        stakedButUnverifiedNativeETH -= extraStakeReceived;
-        emit ExtraStakeReceived(extraStakeReceived);
+    function elOperatorDelegatedTo() external view override returns (address) {
+        return
+            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER)).delegatedTo(address(this));
     }
 
-    function _sendRewardsToRewardReceiver(uint256 rewardsAmount) internal {
-        if (rewardsAmount == 0) return;
-
-        address rewardReceiver = lrtConfig.getContract(LRTConstants.REWARD_RECEIVER);
-        IFeeReceiver(rewardReceiver).receiveFromNodeDelegator{ value: rewardsAmount }();
-        emit ETHRewardsReceived(rewardsAmount);
+    function getNonce() internal view returns (uint256) {
+        return IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER))
+            .cumulativeWithdrawalsQueued(address(this));
     }
 }

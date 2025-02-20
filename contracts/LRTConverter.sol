@@ -3,14 +3,11 @@ pragma solidity 0.8.21;
 
 import { LRTConstants } from "./utils/LRTConstants.sol";
 
-import { LRTConfigRoleChecker, ILRTConfig, IAccessControl } from "./utils/LRTConfigRoleChecker.sol";
 import { UtilLib } from "./utils/UtilLib.sol";
+import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.sol";
 
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
-import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
 import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
-import { IRSETH } from "./interfaces/IRSETH.sol";
-import { IEigenDelegationManager } from "./external/eigenlayer/interfaces/IEigenDelegationManager.sol";
 import { ILRTConverter } from "./interfaces/ILRTConverter.sol";
 
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
@@ -93,7 +90,7 @@ contract LRTConverter is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice swap ETH for LST asset which is accepted by LRTConverter and send to LRTDepositPool
-    /// @dev use LRTOracle to get price for asset. Only callable by LRT manager
+    /// @dev use LRTOracle to get price for asset. Only callable by LRT Operator
     /// @param asset Asset address to swap to
     /// @param minimumExpectedReturnAmount Minimum asset amount to swap to
     function swapEthToAsset(
@@ -122,7 +119,7 @@ contract LRTConverter is
     }
 
     /// @notice send asset from deposit pool to LRTConverter
-    /// @dev Only callable by LRT manager and asset need to be approved
+    /// @dev Only callable by LRT Operator and asset need to be approved
     /// @param _asset Asset address to send
     /// @param _amount Asset amount to send
     function transferAssetFromDepositPool(
@@ -131,7 +128,7 @@ contract LRTConverter is
     )
         external
         onlyConvertableAsset(_asset)
-        onlyLRTManager
+        onlyLRTOperator
     {
         address lrtDepositPoolAddress = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
         address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);

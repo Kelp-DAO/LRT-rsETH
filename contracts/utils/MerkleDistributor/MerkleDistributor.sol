@@ -16,6 +16,7 @@ interface IMerkleDistributor {
     error AlreadyClaimed();
     error InvalidMerkleProof();
     error TransferFailed();
+    error InvalidIndex();
 
     /// @dev returns the address of the token distributed by this contract.
     function token() external view returns (address);
@@ -36,6 +37,8 @@ interface IMerkleDistributor {
     event MerkleRootSet(uint256 index, bytes32 currentMerkleRoot);
 }
 
+/// @title MerkleDistributor
+/// @notice Generice Merkle distributor contract. It is used to distribute tokens to users based on a merkle root.
 contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUpgradeable {
     address public override token;
     address public protocolTreasury;
@@ -43,6 +46,8 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
 
     uint256 public currentMerkleRootIndex;
     bytes32 public currentMerkleRoot;
+
+    uint256 public currentIndex;
 
     struct UserClaim {
         uint256 lastClaimedIndex;
@@ -92,12 +97,16 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
             revert ZeroValueProvided();
         }
 
+        if (index == 0 || index > currentIndex) {
+            revert InvalidIndex();
+        }
+
         if (isClaimed(index, account)) {
             revert AlreadyClaimed();
         }
 
         // Verify the merkle proof.
-        bytes32 node = keccak256(abi.encodePacked(account, cumulativeAmount));
+        bytes32 node = keccak256(abi.encodePacked(index, account, cumulativeAmount));
         if (!MerkleProofUpgradeable.verify(merkleProof, currentMerkleRoot, node)) {
             revert InvalidMerkleProof();
         }
@@ -145,6 +154,7 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
         currentMerkleRoot = _merkleRootToSet;
 
         currentMerkleRootIndex++;
+        currentIndex++;
 
         emit MerkleRootSet(currentMerkleRootIndex, currentMerkleRoot);
     }
@@ -158,6 +168,17 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
         }
 
         protocolTreasury = _protocolTreasury;
+    }
+
+    /// @dev Set the token address.
+    /// @dev only called by the owner.
+    /// @param _token The address of the token.
+    function setToken(address _token) external onlyOwner {
+        if (_token == address(0)) {
+            revert ZeroValueProvided();
+        }
+
+        token = _token;
     }
 
     /// @dev Set the fee in BPS.
