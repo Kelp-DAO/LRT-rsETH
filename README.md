@@ -163,7 +163,7 @@ $ forge script script/Deploy.s.sol --broadcast --fork-url http://localhost:8545
 ```
 
 For instructions on how to deploy to a testnet or mainnet, check out the
-[Solidity Scripting](https://book.getfoundry.sh/tutorials/solidity-scripting.html) tutorial.
+[Solidity Scripting](https://book.getfoundry.sh/guides/scripting-with-solidity) tutorial.
 
 
 ## Verify Contracts
