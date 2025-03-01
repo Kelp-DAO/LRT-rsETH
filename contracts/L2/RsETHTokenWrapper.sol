@@ -21,7 +21,7 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
 
     /// @dev The address of the alternative RsETH token
-    mapping(address allowedToken => bool isAllowed) public allowedTokens;
+    mapping(address => bool) public allowedTokens;
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BRIDGER_ROLE = keccak256("BRIDGER_ROLE");
