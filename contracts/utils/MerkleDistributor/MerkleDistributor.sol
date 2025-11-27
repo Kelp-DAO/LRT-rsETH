@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
@@ -63,7 +63,8 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
 
     /// @dev Initializes the contract
     function initialize(address token_, address _protocolTreasury, uint256 _feeInBPS) public initializer {
-        if (token_ == address(0) || _protocolTreasury == address(0)) {
+        // token can be set later but not the protocol treasury
+        if (_protocolTreasury == address(0)) {
             revert ZeroValueProvided();
         }
 

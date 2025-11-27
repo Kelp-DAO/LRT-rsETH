@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import {
     ERC20Upgradeable, IERC20Upgradeable
@@ -7,7 +7,7 @@ import {
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
-import { UtilLib } from "../utils/UtilLib.sol";
+import { UtilLib } from "contracts/utils/UtilLib.sol";
 import { IL2Messenger } from "contracts/interfaces/L2/IL2Messenger.sol";
 
 interface IOracle {
@@ -27,27 +27,114 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     address public rsETHOracle;
 
     bytes32 public constant BRIDGER_ROLE = keccak256("BRIDGER_ROLE");
+    bytes32 public constant TIMELOCK_ROLE = keccak256("TIMELOCK_ROLE");
 
     /// @notice The L2 bridge address
     address public l2Bridge;
-    /// @notice The L1VaultETH for the L2 chain
+    /// @notice The corresponding L1Vault contract for the L2 chain
     address public l1VaultETHForL2Chain;
     /// @notice The address of the messenger contract that abstracts the L2 bridge calls
     address public messenger;
 
+    /// @notice New variable added for pausable functionality
+    bool public paused;
+
+    /// @notice THe daily minting limit for rsETH
+    uint256 public dailyMintLimit;
+
+    /// @notice The amount of rsETH that was minted today
+    uint256 public dailyMintAmount;
+
+    /// @notice The last day that rsETH was minted
+    uint256 public lastMintDay;
+
+    /// @notice The start timestamp for the daily minting limit
+    uint256 public startTimestamp;
+
+    modifier whenNotPaused() {
+        if (paused) revert ContractPaused();
+        _;
+    }
+
+    modifier whenPaused() {
+        if (!paused) revert ContractNotPaused();
+        _;
+    }
+
+    /// @dev Modifier to enforce the daily minting limit
+    /// @param amount The ETH amount sent in the deposit
+    modifier limitDailyMint(uint256 amount) {
+        if (block.timestamp < startTimestamp) {
+            revert MintBeforeStartTimestamp();
+        }
+
+        // Calculate the amount of rsETH that will be minted
+        (uint256 rsETHAmount,) = viewSwapRsETHAmountAndFee(amount);
+        uint256 currentDay = getCurrentDay();
+
+        // If the current day is greater than the last mint day, reset the daily mint amount
+        if (currentDay > lastMintDay) {
+            lastMintDay = currentDay;
+            dailyMintAmount = 0;
+        }
+
+        // Check if the daily mint amount plus the amount to mint is greater than the daily mint limit
+        if (dailyMintAmount + rsETHAmount > dailyMintLimit) {
+            revert DailyMintLimitExceeded();
+        }
+
+        dailyMintAmount += rsETHAmount;
+        _;
+    }
+
     error InvalidAmount();
     error TransferFailed();
+    error ContractPaused();
+    error ContractNotPaused();
+    error DailyMintLimitExceeded();
+    error InvalidDailyMintLimit();
+    error MintBeforeStartTimestamp();
+    error InvalidStartTimestamp();
+    error DeprecatedFunction();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
-    event AssetsMovedForBridging(uint256 ethBalanceMinusFees);
     event AssetsBridged(uint256 ethBalanceMinusFees);
     event FeeBpsSet(uint256 feeBps);
     event OracleSet(address oracle);
+    event L1VaultETHForL2ChainSet(address l1VaultETHForL2Chain);
+    event L2BridgeSet(address l2Bridge);
+    event Paused(address account);
+    event Unpaused(address account);
+    event DailyMintLimitSet(uint256 dailyMintLimit);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
+    }
+
+    /// @dev Reinitializer function to set the daily minting limit
+    /// @param _dailyMintLimit The daily minting limit
+    /// @param _startTimestamp The start timestamp for the daily minting limit
+    function reinitialize(
+        uint256 _dailyMintLimit,
+        uint256 _startTimestamp
+    )
+        public
+        reinitializer(3)
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        if (_dailyMintLimit == 0) {
+            revert InvalidDailyMintLimit();
+        }
+
+        // startTimestamp cannot be in the past
+        if (block.timestamp > _startTimestamp) {
+            revert InvalidStartTimestamp();
+        }
+
+        dailyMintLimit = _dailyMintLimit;
+        startTimestamp = _startTimestamp;
     }
 
     /// @dev Reinitialize the contract
@@ -109,7 +196,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
 
     /// @dev Swaps ETH for rsETH
     /// @param referralId The referral id
-    function deposit(string memory referralId) external payable nonReentrant {
+    function deposit(string memory referralId) external payable whenNotPaused nonReentrant limitDailyMint(msg.value) {
         uint256 amount = msg.value;
 
         if (amount == 0) revert InvalidAmount();
@@ -138,6 +225,27 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         rsETHAmount = amountAfterFee * 1e18 / rsETHToETHrate;
     }
 
+    /// @notice Gets the current day relative to the start timestamp
+    /// @return uint256 The current day relative to the start timestamp
+    function getCurrentDay() public view returns (uint256) {
+        return (block.timestamp - startTimestamp) / 1 days;
+    }
+
+    /// @notice Gets the remaining daily minting limit
+    /// @return uint256 The remaining daily minting limit
+    function remainingDailyMintLimit() external view returns (uint256) {
+        // If we're on a new day but no mint has occurred yet, treat dailyMintAmount as 0
+        uint256 effectiveDailyMintAmount = (getCurrentDay() > lastMintDay) ? 0 : dailyMintAmount;
+
+        return dailyMintLimit - effectiveDailyMintAmount;
+    }
+
+    /// @notice Gets the next daily mint limit reset timestamp
+    /// @return uint256 The next daily mint limit reset timestamp
+    function getNextDailyLimitResetTimestamp() external view returns (uint256) {
+        return startTimestamp + (getCurrentDay() + 1) * 1 days;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             ACCESS RESTRICTED FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -154,14 +262,8 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     }
 
     /// @dev Legacy function - Withdraws assets from the contract for bridging
-    function moveAssetsForBridging() external onlyRole(BRIDGER_ROLE) {
-        // withdraw ETH - fees
-        uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
-
-        (bool success,) = msg.sender.call{ value: ethBalanceMinusFees }("");
-        if (!success) revert TransferFailed();
-
-        emit AssetsMovedForBridging(ethBalanceMinusFees);
+    function moveAssetsForBridging() external view onlyRole(BRIDGER_ROLE) {
+        revert DeprecatedFunction();
     }
 
     /// @dev Withdraws assets from the L2 to L1
@@ -178,29 +280,55 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
 
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
-    function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setFeeBps(uint256 _feeBps) external onlyRole(TIMELOCK_ROLE) {
         if (_feeBps > 10_000) revert InvalidAmount();
-
         feeBps = _feeBps;
-
         emit FeeBpsSet(_feeBps);
     }
 
     /// @dev Sets the rsETHOracle address
     /// @param _rsETHOracle The rsETHOracle address
-    function setRSETHOracle(address _rsETHOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setRSETHOracle(address _rsETHOracle) external onlyRole(TIMELOCK_ROLE) {
         UtilLib.checkNonZeroAddress(_rsETHOracle);
-
         rsETHOracle = _rsETHOracle;
-
         emit OracleSet(_rsETHOracle);
+    }
+
+    /// @dev Sets the new L1VaultETH for the L2 chain
+    /// @param _l1VaultETHForL2Chain The new L1VaultETH for the L2 chain
+    function setL1VaultETHForL2Chain(address _l1VaultETHForL2Chain) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_l1VaultETHForL2Chain);
+        l1VaultETHForL2Chain = _l1VaultETHForL2Chain;
+        emit L1VaultETHForL2ChainSet(_l1VaultETHForL2Chain);
     }
 
     /// @dev Sets the l2Bridge address
     /// @param _l2Bridge The l2Bridge address
-    function setL2Bridge(address _l2Bridge) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setL2Bridge(address _l2Bridge) external onlyRole(TIMELOCK_ROLE) {
         UtilLib.checkNonZeroAddress(_l2Bridge);
-
         l2Bridge = _l2Bridge;
+        emit L2BridgeSet(_l2Bridge);
+    }
+
+    /// @dev Pauses the pausable methods in the contract
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @dev Unpauses the pausable methods in the contract
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    /// @dev Sets the daily minting limit
+    /// @param _dailyMintLimit The new daily minting limit
+    function setDailyMintLimit(uint256 _dailyMintLimit) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_dailyMintLimit == 0) {
+            revert InvalidDailyMintLimit();
+        }
+        dailyMintLimit = _dailyMintLimit;
+        emit DailyMintLimitSet(_dailyMintLimit);
     }
 }

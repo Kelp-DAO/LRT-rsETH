@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { IL2Messenger } from "contracts/interfaces/L2/IL2Messenger.sol";
 import { IScrollMessenger } from "contracts/interfaces/L2/IScrollMessenger.sol";

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { SafeERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
@@ -7,8 +7,6 @@ import { ERC20PermitUpgradeable } from
     "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-
-import { UtilLib } from "../utils/UtilLib.sol";
 
 /// @title RsETHTokenWrapper
 /// @notice This contract is a wrapper for alternative RsETH tokens in L2 chains for a canonical rsETH token for KelpDao
@@ -25,14 +23,15 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BRIDGER_ROLE = keccak256("BRIDGER_ROLE");
+    bytes32 public constant TIMELOCK_ROLE = keccak256("TIMELOCK_ROLE");
 
     error TokenNotAllowed();
     error CannotDeposit();
-    error InsufficientBalance();
 
     event Deposit(address asset, address _sender, uint256 _amount);
     event Withdraw(address asset, address _sender, uint256 _amount);
     event BridgerDeposited(address asset, uint256 _amount);
+    event TokenRemoved(address asset);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -151,27 +150,13 @@ contract RsETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
         emit BridgerDeposited(_asset, _amount);
     }
 
-    /**
-     * @notice Move the altRsETH tokens to the pool
-     * @param _asset The address of the token to move
-     * @param _amount The amount of tokens to move
-     * @param _rsEthPool The address of the RsEthPool to move the tokens to
-     */
-    function moveWrsETHToPool(address _asset, uint256 _amount, address _rsEthPool) external onlyRole(MANAGER_ROLE) {
-        UtilLib.checkNonZeroAddress(_asset);
-        UtilLib.checkNonZeroAddress(_rsEthPool);
-
-        if (balanceOf(address(this)) < _amount) revert InsufficientBalance();
-
-        ERC20Upgradeable(_asset).safeTransfer(_rsEthPool, _amount);
-    }
-
     /// Dont' allow to add other tokens at the moment. Only allow the altRsETH token as set in the initialize function
 
     /// @dev Remove a token from the allowed tokens list
     /// @param _asset The address of the token to remove
-    function removeAllowedToken(address _asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function removeAllowedToken(address _asset) external onlyRole(TIMELOCK_ROLE) {
         allowedTokens[_asset] = false;
+        emit TokenRemoved(_asset);
     }
 
     /// @dev Mint wrsETH tokens

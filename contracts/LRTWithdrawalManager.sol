@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
@@ -123,15 +123,7 @@ contract LRTWithdrawalManager is
     /// @notice Completes a user's withdrawal process by transferring the ETH/LST amount corresponding to the rsETH
     /// unstaked.
     /// @param asset The asset address the user wishes to withdraw.
-    function completeWithdrawal(
-        address asset,
-        string calldata referralId
-    )
-        external
-        nonReentrant
-        whenNotPaused
-        onlySupportedAsset(asset)
-    {
+    function completeWithdrawal(address asset, string calldata referralId) external nonReentrant whenNotPaused {
         // Retrieve and remove the oldest withdrawal request for the user.
         uint256 usersFirstWithdrawalRequestNonce = userAssociatedNonces[asset][msg.sender].popFront();
         // Ensure the request is already unlocked.

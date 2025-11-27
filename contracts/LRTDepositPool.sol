@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
@@ -13,12 +13,11 @@ import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
 import { ILRTConverter } from "./interfaces/ILRTConverter.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import { IDelegationManager } from "./external/eigenlayer/interfaces/IDelegationManager.sol";
 
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { ILido } from "./external/lido/ILido.sol";
 
 /// @title LRTDepositPool - Deposit Pool Contract for LSTs
 /// @notice Handles LST asset deposits
@@ -285,7 +284,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
     }
 
     /// @dev Triggers stopped state. Contract must not be paused.
-    function pause() external onlyLRTManager {
+    function pause() external onlyRole(LRTConstants.PAUSER_ROLE) {
         _pause();
     }
 
@@ -317,13 +316,12 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            int256 assetStakedInEigenLayer,
+            uint256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
         ) = getAssetDistributionData(asset);
-        uint256 effectiveAssetWithEigenLayer =
-            SafeCast.toUint256(assetStakedInEigenLayer + SafeCast.toInt256(assetUnstakingFromEigenLayer));
+        uint256 effectiveAssetWithEigenLayer = assetStakedInEigenLayer + assetUnstakingFromEigenLayer;
         return (
             assetLyingInDepositPool + assetLyingInNDCs + effectiveAssetWithEigenLayer + assetLyingInConverter
                 + assetLyingUnstakingVault
@@ -365,7 +363,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         returns (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            int256 assetStakedInEigenLayer,
+            uint256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
@@ -374,15 +372,18 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         if (asset == LRTConstants.ETH_TOKEN) {
             return getETHDistributionData();
         }
+
         assetLyingInDepositPool = IERC20(asset).balanceOf(address(this));
+        // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
+        assetUnstakingFromEigenLayer =
+            ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)).getAssetsUnstaking(asset);
 
         uint256 ndcsCount = nodeDelegatorQueue.length;
         for (uint256 i; i < ndcsCount;) {
             assetLyingInNDCs += IERC20(asset).balanceOf(nodeDelegatorQueue[i]);
-            if (!INodeDelegator(nodeDelegatorQueue[i]).hasAllWithdrawalsAccounted()) {
-                revert NodeDelegatorHasUnaccountedWithdrawals();
-            }
-            assetStakedInEigenLayer += SafeCast.toInt256(INodeDelegator(nodeDelegatorQueue[i]).getAssetBalance(asset));
+
+            assetStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getAssetBalance(asset);
+            assetUnstakingFromEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getAssetUnstaking(asset);
 
             unchecked {
                 ++i;
@@ -390,7 +391,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         }
 
         address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
-        assetUnstakingFromEigenLayer = ILRTUnstakingVault(lrtUnstakingVault).getAssetsUnstaking(asset);
+
         assetLyingInConverter = 0; //assets in converter are accounted in there eth value => getETHDistributionData
         assetLyingUnstakingVault = IERC20(asset).balanceOf(lrtUnstakingVault);
     }
@@ -405,7 +406,7 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         returns (
             uint256 ethLyingInDepositPool,
             uint256 ethLyingInNDCs,
-            int256 ethStakedInEigenLayer,
+            uint256 ethStakedInEigenLayer,
             uint256 ethUnstakingFromEigenLayer,
             uint256 ethLyingInConverter,
             uint256 ethLyingInUnstakingVault
@@ -414,24 +415,25 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         ethLyingInDepositPool = address(this).balance;
 
         uint256 ndcsCount = nodeDelegatorQueue.length;
+        ethUnstakingFromEigenLayer = ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT))
+            .getAssetsUnstaking(LRTConstants.ETH_TOKEN);
+
         for (uint256 i; i < ndcsCount;) {
             ethLyingInNDCs += nodeDelegatorQueue[i].balance;
-            if (!INodeDelegator(nodeDelegatorQueue[i]).hasAllWithdrawalsAccounted()) {
-                revert NodeDelegatorHasUnaccountedWithdrawals();
-            }
+
             ethStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getEffectivePodShares();
+            ethUnstakingFromEigenLayer +=
+                INodeDelegator(nodeDelegatorQueue[i]).getAssetUnstaking(LRTConstants.ETH_TOKEN);
             unchecked {
                 ++i;
             }
         }
 
         address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
-        ethUnstakingFromEigenLayer = ILRTUnstakingVault(lrtUnstakingVault).getAssetsUnstaking(LRTConstants.ETH_TOKEN);
+        ethLyingInUnstakingVault = lrtUnstakingVault.balance;
 
         address lrtConverter = lrtConfig.getContract(LRTConstants.LRT_CONVERTER);
         ethLyingInConverter = ILRTConverter(lrtConverter).ethValueInWithdrawal();
-
-        ethLyingInUnstakingVault = lrtUnstakingVault.balance;
     }
 
     /// @notice View amount of rsETH to mint for given asset amount
@@ -474,6 +476,16 @@ contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgrad
         uint256 ethPricePerUint = 1e18;
 
         return ethPricePerUint * ethAmountToSend / lrtOracle.getAssetPrice(toAsset);
+    }
+
+    /// @notice Stakes ETH with Lido to receive stETH
+    /// @param referral Optional referral address for Lido
+    function stakeEthForStETH(address referral, uint256 ethAmount) external onlyLRTManager {
+        address stETHAddress = lrtConfig.getLSTToken(LRTConstants.ST_ETH_TOKEN);
+
+        uint256 stETHShares = ILido(stETHAddress).submit{ value: ethAmount }(referral);
+
+        emit AssetStaked(stETHAddress, ethAmount, stETHShares);
     }
 
     /*//////////////////////////////////////////////////////////////

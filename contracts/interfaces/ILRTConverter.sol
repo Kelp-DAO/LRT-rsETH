@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 interface ILRTConverter {
     error NotEnoughAssetToTransfer();
@@ -11,7 +11,7 @@ interface ILRTConverter {
     error WithdrawalRootNotProcessed();
     error MinimumExpectedReturnNotReached();
 
-    event ConvertedEigenlayerAssetToRsEth(address indexed reciever, uint256 rsethAmount, bytes32 withdrawalRoot);
+    event ConvertedEigenlayerAssetToRsEth(address indexed receiver, uint256 rsethAmount, bytes32 withdrawalRoot);
     event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
     event EthTransferred(address to, uint256 amount);
 

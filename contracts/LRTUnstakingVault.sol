@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
 import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.sol";
-
-import { INodeDelegator, IDelegationManager } from "./interfaces/INodeDelegator.sol";
+import { INodeDelegator, IDelegationManagerTypes } from "./interfaces/INodeDelegator.sol";
+import { IEigenPodManager } from "./external/eigenlayer/interfaces/IEigenPodManager.sol";
 import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
 import { ILRTWithdrawalManager } from "./interfaces/ILRTWithdrawalManager.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
-import { IEigenStrategyManager } from "./external/eigenlayer/interfaces/IEigenStrategyManager.sol";
+import { IStrategyManager } from "./external/eigenlayer/interfaces/IStrategyManager.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { SlashingLib } from "./external/eigenlayer/libraries/SlashingLib.sol";
+import { IDelegationManager } from "contracts/external/eigenlayer/interfaces/IDelegationManager.sol";
 
 /// @title LRTUnstakingVault Contract
 /// @notice The contract that handles the unstaking of assets
@@ -26,15 +28,20 @@ contract LRTUnstakingVault is
     ReentrancyGuardUpgradeable
 {
     using SafeERC20 for IERC20;
+    using SlashingLib for *;
+    using LRTConstants for ILRTConfig;
 
-    // Mapping from asset addresses to the total number of shares currently undergoing the unstaking process in
-    // EigenLayer. This count is critical for accurately calculating the price of assets.
+    // NOTE: For legacy withdrawal support, this can be made private after all pre slashing withdrawals are processed
+    // (asset => 0)
     mapping(address asset => uint256) public sharesUnstaking;
 
     mapping(bytes32 => bool) public trackedWithdrawal;
 
+    uint256 public uncompletedWithdrawalCount;
+    uint256 public maxUncompletedWithdrawalCount;
+
     modifier onlyLRTNodeDelegator() {
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
+        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
 
         if (lrtDepositPool.isNodeDelegator(msg.sender) != 1) {
             revert CallerNotLRTNodeDelegator();
@@ -43,7 +50,7 @@ contract LRTUnstakingVault is
     }
 
     modifier onlyLRTWithdrawalManager() {
-        if (msg.sender != lrtConfig.getContract(LRTConstants.LRT_WITHDRAW_MANAGER)) {
+        if (msg.sender != lrtConfig.withdrawManager()) {
             revert CallerNotLRTWithdrawalManager();
         }
         _;
@@ -95,31 +102,6 @@ contract LRTUnstakingVault is
         }
     }
 
-    /// @notice Adds shares that are in unstaking process.
-    /// @param asset The asset address.
-    /// @param amount The amount of shares added to the unstaking pool.
-    /// @dev This function is only callable by the NodeDelegator contracts when it initiates unstaking process.
-    function addSharesUnstaking(address asset, uint256 amount) external onlyLRTNodeDelegator {
-        // Increase the tracking of shares currently in the process of unstaking from Eigenlayer.
-        sharesUnstaking[asset] += amount;
-    }
-
-    /// @notice Adds shares that are in unstaking process.
-    /// @param asset The asset address.
-    /// @param amount The amount of shares added to the unstaking pool.
-    /// @dev This function is only callable by the NodeDelegator contracts when it initiates unstaking process.
-    function reduceSharesUnstaking(address asset, uint256 amount) external onlyLRTNodeDelegator {
-        // Increase the tracking of shares currently in the process of unstaking from Eigenlayer.
-        sharesUnstaking[asset] -= amount;
-    }
-
-    /// @notice Tracks the withdrawal initiated by the NodeDelegator contract.
-    /// @param withdrawalRoot The withdrawal root.
-    /// @dev This function is only callable by the NodeDelegator contracts when it initiates unstaking process.
-    function trackWithdrawal(bytes32 withdrawalRoot) external onlyLRTNodeDelegator {
-        trackedWithdrawal[withdrawalRoot] = true;
-    }
-
     /// @notice transfers asset lying in this LRTUnstakingVault to node delegator contract
     /// @dev only callable by LRT Operator
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
@@ -135,7 +117,7 @@ contract LRTUnstakingVault is
         onlyLRTOperator
         onlySupportedAsset(asset)
     {
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
+        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
         address[] memory nodeDelegatorQueue = lrtDepositPool.getNodeDelegatorQueue();
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
         IERC20(asset).safeTransfer(nodeDelegator, amount);
@@ -146,17 +128,51 @@ contract LRTUnstakingVault is
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param amount ETH amount to transfer
     function transferETHToNodeDelegator(uint256 ndcIndex, uint256 amount) external nonReentrant onlyLRTOperator {
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
+        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
         address[] memory nodeDelegatorQueue = lrtDepositPool.getNodeDelegatorQueue();
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
         INodeDelegator(nodeDelegator).sendETHFromUnstakingVaultToNDC{ value: amount }();
         emit EthTransferred(nodeDelegator, amount);
     }
 
+    /// @notice Reduce shares that are in unstaking process.
+    /// @param asset The asset address.
+    /// @param amount The amount of shares to reduce.
+    /// @dev This function is only callable by the NodeDelegator contracts during the unstaking process.
+    function reduceSharesUnstaking(address asset, uint256 amount) external onlyLRTNodeDelegator {
+        sharesUnstaking[asset] -= amount;
+    }
+
+    /// @notice Set the max number of uncompleted withdrawals.
+    /// @param _maxUncompletedWithdrawalCount The max number of uncompleted withdrawals.
+    function setMaxUncompletedWithdrawalCount(uint256 _maxUncompletedWithdrawalCount) external onlyLRTManager {
+        // 120 is the max number of uncompleted withdrawals that allows us to still perform update rsETH price
+        // Need buffer for theoretical operator forced undelegations (ndc count * asset count = 15)
+        if (_maxUncompletedWithdrawalCount > 80) {
+            revert MaxUncompletedWithdrawalCountTooHigh();
+        }
+        maxUncompletedWithdrawalCount = _maxUncompletedWithdrawalCount;
+    }
+
+    /// @notice Increase the number of uncompleted withdrawals.
+    /// @dev This function is only callable by the NodeDelegator contracts during the unstaking process.
+    function increaseUncompletedWithdrawalCount() external onlyLRTNodeDelegator {
+        uncompletedWithdrawalCount++;
+    }
+
+    /// @notice Decrease the number of uncompleted withdrawals.
+    /// @dev This function is only callable by the NodeDelegator contracts during the unstaking process.
+    function decreaseUncompletedWithdrawalCount() external onlyLRTNodeDelegator {
+        if (uncompletedWithdrawalCount > 0) {
+            uncompletedWithdrawalCount--;
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                             view functions
     //////////////////////////////////////////////////////////////*/
 
+    // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
     /// @notice Returns the total asset amount in unstaking process.
     /// @param asset The asset address.
     /// @return The total asset amount in unstaking process.
@@ -181,17 +197,16 @@ contract LRTUnstakingVault is
     }
 
     /// @notice Fetches balance of all assets staked in eigen layer through this contract
-    /// @param user the user address
+    /// @param staker the staker address
     /// @return assets the assets that the node delegator has deposited into strategies
     /// @return assetBalances the balances of the assets that the node delegator has deposited into strategies
-    function getStakedAssetBalances(address user)
+    function getStakedAssetBalances(address staker)
         external
         view
         override
         returns (address[] memory assets, uint256[] memory assetBalances)
     {
-        (IStrategy[] memory strategies,) =
-            IEigenStrategyManager(lrtConfig.getContract(LRTConstants.EIGEN_STRATEGY_MANAGER)).getDeposits(user);
+        (IStrategy[] memory strategies,) = IStrategyManager(lrtConfig.strategyManager()).getDeposits(staker);
 
         uint256 strategiesLength = strategies.length;
         assets = new address[](strategiesLength);
@@ -199,55 +214,7 @@ contract LRTUnstakingVault is
 
         for (uint256 i = 0; i < strategiesLength;) {
             assets[i] = address(IStrategy(strategies[i]).underlyingToken());
-            assetBalances[i] = IStrategy(strategies[i]).userUnderlyingView(address(this));
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /**
-     * @notice  Tracks the undelegated shares caused by ELOperatorDelegator undelegating
-     * @dev     This function is only callable by the LRT Operator
-     * @dev     This function will be called by operator when OperatorDelegator undelegated
-     * @param   withdrawals  Withdrawals struct list needs to be tracked
-     */
-    function registerPendingWithdrawals(IDelegationManager.Withdrawal[] calldata withdrawals)
-        external
-        nonReentrant
-        onlyLRTOperator
-    {
-        address elDelegationManagerAddr = lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER);
-        IDelegationManager elDelegationManager = IDelegationManager(elDelegationManagerAddr);
-        address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
-
-        for (uint256 i = 0; i < withdrawals.length;) {
-            IDelegationManager.Withdrawal memory withdrawal = withdrawals[i];
-            bytes32 withdrawalRoot = elDelegationManager.calculateWithdrawalRoot(withdrawal);
-
-            if (trackedWithdrawal[withdrawalRoot]) {
-                revert WithdrawalAlreadyRegistered();
-            }
-            if (lrtDepositPool.isNodeDelegator(withdrawal.staker) != 1) {
-                revert IncorrectStaker();
-            }
-
-            if (!elDelegationManager.pendingWithdrawals(withdrawalRoot)) {
-                revert WithdrawalNotPending();
-            }
-            trackedWithdrawal[withdrawalRoot] = true;
-            INodeDelegator(withdrawal.staker).increaseLastNonce();
-            for (uint256 j = 0; j < withdrawal.strategies.length;) {
-                if (beaconChainETHStrategy == address(withdrawal.strategies[j])) {
-                    sharesUnstaking[LRTConstants.ETH_TOKEN] += withdrawal.shares[j];
-                } else {
-                    sharesUnstaking[address(withdrawal.strategies[j].underlyingToken())] += withdrawal.shares[j];
-                }
-                unchecked {
-                    ++j;
-                }
-            }
+            assetBalances[i] = IStrategy(strategies[i]).userUnderlyingView(staker);
             unchecked {
                 ++i;
             }

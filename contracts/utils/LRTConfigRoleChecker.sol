@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
-import { UtilLib } from "./UtilLib.sol";
 import { LRTConstants } from "./LRTConstants.sol";
 
 import { ILRTConfig } from "../interfaces/ILRTConfig.sol";
@@ -51,18 +50,5 @@ abstract contract LRTConfigRoleChecker {
             revert ILRTConfig.AssetNotSupported();
         }
         _;
-    }
-
-    // setters
-
-    /// @notice Updates the LRT config contract
-    /// @dev only callable by LRT admin
-    /// @param lrtConfigAddr the new LRT config contract Address
-    function updateLRTConfig(address lrtConfigAddr) external virtual onlyLRTAdmin {
-        if (address(lrtConfig) != address(0)) revert ILRTConfig.ValueAlreadyInUse();
-
-        UtilLib.checkNonZeroAddress(lrtConfigAddr);
-        lrtConfig = ILRTConfig(lrtConfigAddr);
-        emit UpdatedLRTConfig(lrtConfigAddr);
     }
 }

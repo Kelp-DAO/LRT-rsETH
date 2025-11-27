@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 interface ILRTDepositPool {
     //errors
@@ -13,7 +13,6 @@ interface ILRTDepositPool {
     error NodeDelegatorHasAssetBalance(address assetAddress, uint256 assetBalance);
     error NodeDelegatorHasETH();
     error EthTransferFailed();
-    error NodeDelegatorHasUnaccountedWithdrawals();
 
     //events
     event MaxNodeDelegatorLimitUpdated(uint256 maxNodeDelegatorLimit);
@@ -31,6 +30,7 @@ interface ILRTDepositPool {
     event MaxNegligibleAmountUpdated(uint256 maxNegligibleAmount);
     event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
     event EthTransferred(address to, uint256 amount);
+    event AssetStaked(address indexed asset, uint256 ethAmount, uint256 stETHShares);
 
     // functions
     function depositETH(uint256 minRSETHAmountExpected, string calldata referralId) external payable;
@@ -71,7 +71,7 @@ interface ILRTDepositPool {
         returns (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
-            int256 assetStakedInEigenLayer,
+            uint256 assetStakedInEigenLayer,
             uint256 assetUnstakingFromEigenLayer,
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
@@ -83,7 +83,7 @@ interface ILRTDepositPool {
         returns (
             uint256 ethLyingInDepositPool,
             uint256 ethLyingInNDCs,
-            int256 ethStakedInEigenLayer,
+            uint256 ethStakedInEigenLayer,
             uint256 ethUnstakingFromEigenLayer,
             uint256 ethLyingInConverter,
             uint256 ethLyingInUnstakingVault

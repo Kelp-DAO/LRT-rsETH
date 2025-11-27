@@ -1,24 +1,74 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity >=0.5.0;
 
-import "../libraries/BeaconChainProofs.sol";
-import "./IEigenPodManager.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/**
- * @title The implementation contract used for restaking beacon chain ETH on EigenLayer
- * @author Layr Labs, Inc.
- * @notice Terms of Service: https://docs.eigenlayer.xyz/overview/terms-of-service
- * @dev Note that all beacon chain balances are stored as gwei within the beacon chain datastructures. We choose
- *   to account balances in terms of gwei in the EigenPod contract and convert to wei when making calls to other
- * contracts
- */
-interface IEigenPod {
-    /**
-     *
-     *                                STRUCTS / ENUMS
-     *
-     */
+import "../libraries/BeaconChainProofs.sol";
+import "./IEigenPodManager.sol";
+
+interface IEigenPodErrors {
+    /// @dev Thrown when msg.sender is not the EPM.
+    error OnlyEigenPodManager();
+    /// @dev Thrown when msg.sender is not the pod owner.
+    error OnlyEigenPodOwner();
+    /// @dev Thrown when msg.sender is not owner or the proof submitter.
+    error OnlyEigenPodOwnerOrProofSubmitter();
+    /// @dev Thrown when attempting an action that is currently paused.
+    error CurrentlyPaused();
+
+    /// Invalid Inputs
+
+    /// @dev Thrown when an address of zero is provided.
+    error InputAddressZero();
+    /// @dev Thrown when two array parameters have mismatching lengths.
+    error InputArrayLengthMismatch();
+    /// @dev Thrown when `validatorPubKey` length is not equal to 48-bytes.
+    error InvalidPubKeyLength();
+    /// @dev Thrown when provided timestamp is out of range.
+    error TimestampOutOfRange();
+
+    /// Checkpoints
+
+    /// @dev Thrown when no active checkpoints are found.
+    error NoActiveCheckpoint();
+    /// @dev Thrown if an uncompleted checkpoint exists.
+    error CheckpointAlreadyActive();
+    /// @dev Thrown if there's not a balance available to checkpoint.
+    error NoBalanceToCheckpoint();
+    /// @dev Thrown when attempting to create a checkpoint twice within a given block.
+    error CannotCheckpointTwiceInSingleBlock();
+
+    /// Withdrawing
+
+    /// @dev Thrown when amount exceeds `restakedExecutionLayerGwei`.
+    error InsufficientWithdrawableBalance();
+
+    /// Validator Status
+
+    /// @dev Thrown when a validator's withdrawal credentials have already been verified.
+    error CredentialsAlreadyVerified();
+    /// @dev Thrown if the provided proof is not valid for this EigenPod.
+    error WithdrawalCredentialsNotForEigenPod();
+    /// @dev Thrown when a validator is not in the ACTIVE status in the pod.
+    error ValidatorNotActiveInPod();
+    /// @dev Thrown when validator is not active yet on the beacon chain.
+    error ValidatorInactiveOnBeaconChain();
+    /// @dev Thrown if a validator is exiting the beacon chain.
+    error ValidatorIsExitingBeaconChain();
+    /// @dev Thrown when a validator has not been slashed on the beacon chain.
+    error ValidatorNotSlashedOnBeaconChain();
+
+    /// Misc
+
+    /// @dev Thrown when an invalid block root is returned by the EIP-4788 oracle.
+    error InvalidEIP4788Response();
+    /// @dev Thrown when attempting to send an invalid amount to the beacon deposit contract.
+    error MsgValueNot32ETH();
+    /// @dev Thrown when provided `beaconTimestamp` is too far in the past.
+    error BeaconTimestampTooFarInPast();
+}
+
+interface IEigenPodTypes {
     enum VALIDATOR_STATUS {
         INACTIVE, // doesnt exist
         ACTIVE, // staked on ethpos and withdrawal credentials are pointed to the EigenPod
@@ -41,15 +91,12 @@ interface IEigenPod {
         bytes32 beaconBlockRoot;
         uint24 proofsRemaining;
         uint64 podBalanceGwei;
-        int128 balanceDeltasGwei;
+        int64 balanceDeltasGwei;
+        uint64 prevBeaconBalanceGwei;
     }
+}
 
-    /**
-     *
-     *                                    EVENTS
-     *
-     */
-
+interface IEigenPodEvents is IEigenPodTypes {
     /// @notice Emitted when an ETH validator stakes via this eigenPod
     event EigenPodStaked(bytes pubkey);
 
@@ -71,7 +118,9 @@ interface IEigenPod {
     event NonBeaconChainETHReceived(uint256 amountReceived);
 
     /// @notice Emitted when a checkpoint is created
-    event CheckpointCreated(uint64 indexed checkpointTimestamp, bytes32 indexed beaconBlockRoot);
+    event CheckpointCreated(
+        uint64 indexed checkpointTimestamp, bytes32 indexed beaconBlockRoot, uint256 validatorCount
+    );
 
     /// @notice Emitted when a checkpoint is finalized
     event CheckpointFinalized(uint64 indexed checkpointTimestamp, int256 totalShareDeltaWei);
@@ -81,13 +130,17 @@ interface IEigenPod {
 
     /// @notice Emitted when a validaor is proven to have 0 balance at a given checkpoint
     event ValidatorWithdrawn(uint64 indexed checkpointTimestamp, uint40 indexed validatorIndex);
+}
 
-    /**
-     *
-     *                       EXTERNAL STATE-CHANGING METHODS
-     *
-     */
-
+/**
+ * @title The implementation contract used for restaking beacon chain ETH on EigenLayer
+ * @author Layr Labs, Inc.
+ * @notice Terms of Service: https://docs.eigenlayer.xyz/overview/terms-of-service
+ * @dev Note that all beacon chain balances are stored as gwei within the beacon chain datastructures. We choose
+ *   to account balances in terms of gwei in the EigenPod contract and convert to wei when making calls to other
+ * contracts
+ */
+interface IEigenPod is IEigenPodErrors, IEigenPodEvents {
     /// @notice Used to initialize the pointers to contracts crucial to the pod's functionality, in beacon proxy
     /// construction from EigenPodManager
     function initialize(address owner) external;
@@ -100,7 +153,7 @@ interface IEigenPod {
      * @notice Called by EigenPodManager to withdrawBeaconChainETH that has been added to the EigenPod's balance due to
      * a withdrawal from the beacon chain.
      * @dev The podOwner must have already proved sufficient withdrawals, so that this pod's
-     * `withdrawableRestakedExecutionLayerGwei` exceeds the
+     * `restakedExecutionLayerGwei` exceeds the
      * `amountWei` input (when converted to GWEI).
      * @dev Reverts if `amountWei` is not a whole Gwei amount
      */
@@ -291,8 +344,4 @@ interface IEigenPod {
     /// to an existing slot within the last 24 hours. If the slot at `timestamp` was skipped, this method
     /// will revert.
     function getParentBlockRoot(uint64 timestamp) external view returns (bytes32);
-
-    /// @return delayedWithdrawalRouter address of eigenlayer delayedWithdrawalRouter,
-    /// which does book keeping of delayed withdrawls
-    function delayedWithdrawalRouter() external view returns (address);
 }

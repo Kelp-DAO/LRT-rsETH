@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 import {
     ERC20Upgradeable, IERC20Upgradeable
@@ -8,7 +8,7 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import { UtilLib } from "../utils/UtilLib.sol";
+import { UtilLib } from "contracts/utils/UtilLib.sol";
 
 interface IOracle {
     function getRate() external view returns (uint256);
@@ -33,6 +33,73 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     mapping(address token => address oracle) public supportedTokenOracle;
     address[] public supportedTokenList;
 
+    /// @notice New variable added for pausable functionality
+    bool public paused;
+
+    /// @notice ETH identifier address
+    address public constant ETH_IDENTIFIER = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// @notice THe daily minting limit for rsETH
+    uint256 public dailyMintLimit;
+
+    /// @notice The amount of rsETH that was minted today
+    uint256 public dailyMintAmount;
+
+    /// @notice The last day that rsETH was minted
+    uint256 public lastMintDay;
+
+    /// @notice The start timestamp for the daily minting limit
+    uint256 public startTimestamp;
+
+    modifier whenNotPaused() {
+        if (paused) revert ContractPaused();
+        _;
+    }
+
+    modifier whenPaused() {
+        if (!paused) revert ContractNotPaused();
+        _;
+    }
+
+    modifier onlySupportedToken(address token) {
+        if (supportedTokenOracle[token] == address(0)) revert UnsupportedToken();
+        _;
+    }
+
+    /// @dev Modifier to enforce the daily minting limit
+    /// @param amount The asset amount sent in the deposit
+    /// @param token The token address
+    modifier limitDailyMint(uint256 amount, address token) {
+        if (block.timestamp < startTimestamp) {
+            revert MintBeforeStartTimestamp();
+        }
+
+        uint256 rsETHAmount;
+
+        // Calculate the amount of rsETH that will be minted
+        if (token == ETH_IDENTIFIER) {
+            (rsETHAmount,) = viewSwapRsETHAmountAndFee(amount);
+        } else {
+            (rsETHAmount,) = viewSwapRsETHAmountAndFee(amount, token);
+        }
+
+        uint256 currentDay = getCurrentDay();
+
+        // If the current day is greater than the last mint day, reset the daily mint amount
+        if (currentDay > lastMintDay) {
+            lastMintDay = currentDay;
+            dailyMintAmount = 0;
+        }
+
+        // Check if the daily mint amount plus the amount to mint is greater than the daily mint limit
+        if (dailyMintAmount + rsETHAmount > dailyMintLimit) {
+            revert DailyMintLimitExceeded();
+        }
+
+        dailyMintAmount += rsETHAmount;
+        _;
+    }
+
     error InvalidAmount();
     error TransferFailed();
     error UnsupportedToken();
@@ -40,6 +107,12 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     error AlreadySupportedToken();
     error TokenNotFoundError();
     error EthDepositDisabled();
+    error ContractPaused();
+    error ContractNotPaused();
+    error DailyMintLimitExceeded();
+    error InvalidDailyMintLimit();
+    error MintBeforeStartTimestamp();
+    error InvalidStartTimestamp();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
@@ -51,15 +124,37 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     event AddSupportedToken(address token);
     event RemovedSupportedToken(address token);
     event IsEthDepositEnabled(bool isEthDepositEnabled);
-
-    modifier onlySupportedToken(address token) {
-        if (supportedTokenOracle[token] == address(0)) revert UnsupportedToken();
-        _;
-    }
+    event Paused(address account);
+    event Unpaused(address account);
+    event DailyMintLimitSet(uint256 dailyMintLimit);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
+    }
+
+    /// @dev Reinitializer function to set the daily minting limit
+    /// @param _dailyMintLimit The daily minting limit
+    /// @param _startTimestamp The start timestamp for the daily minting limit
+    function reinitialize(
+        uint256 _dailyMintLimit,
+        uint256 _startTimestamp
+    )
+        public
+        reinitializer(2)
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        if (_dailyMintLimit == 0) {
+            revert InvalidDailyMintLimit();
+        }
+
+        // startTimestamp cannot be in the past
+        if (block.timestamp > _startTimestamp) {
+            revert InvalidStartTimestamp();
+        }
+
+        dailyMintLimit = _dailyMintLimit;
+        startTimestamp = _startTimestamp;
     }
 
     /// @dev Initialize the contract
@@ -107,7 +202,13 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
 
     /// @dev Swaps ETH for rsETH
     /// @param referralId The referral id
-    function deposit(string memory referralId) external payable nonReentrant {
+    function deposit(string memory referralId)
+        external
+        payable
+        whenNotPaused
+        nonReentrant
+        limitDailyMint(msg.value, ETH_IDENTIFIER)
+    {
         if (!isEthDepositEnabled) revert EthDepositDisabled();
         uint256 amount = msg.value;
 
@@ -132,8 +233,10 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         string memory referralId
     )
         external
+        whenNotPaused
         nonReentrant
         onlySupportedToken(token)
+        limitDailyMint(amount, token)
     {
         if (amount == 0) revert InvalidAmount();
 
@@ -189,6 +292,27 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         rsETHAmount = amountAfterFee * tokenToETHRate / rsETHToETHrate;
     }
 
+    /// @notice Gets the current day relative to the start timestamp
+    /// @return uint256 The current day relative to the start timestamp
+    function getCurrentDay() public view returns (uint256) {
+        return (block.timestamp - startTimestamp) / 1 days;
+    }
+
+    /// @notice Gets the remaining daily minting limit
+    /// @return uint256 The remaining daily minting limit
+    function remainingDailyMintLimit() external view returns (uint256) {
+        // If we're on a new day but no mint has occurred yet, treat dailyMintAmount as 0
+        uint256 effectiveDailyMintAmount = (getCurrentDay() > lastMintDay) ? 0 : dailyMintAmount;
+
+        return dailyMintLimit - effectiveDailyMintAmount;
+    }
+
+    /// @notice Gets the next daily mint limit reset timestamp
+    /// @return uint256 The next daily mint limit reset timestamp
+    function getNextDailyLimitResetTimestamp() external view returns (uint256) {
+        return startTimestamp + (getCurrentDay() + 1) * 1 days;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             ACCESS RESTRICTED FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -239,9 +363,7 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     /// @param _feeBps The fee basis points
     function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_feeBps > 10_000) revert InvalidAmount();
-
         feeBps = _feeBps;
-
         emit FeeBpsSet(_feeBps);
     }
 
@@ -256,9 +378,7 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     /// @param _rsETHOracle The rsETHOracle address
     function setRSETHOracle(address _rsETHOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         UtilLib.checkNonZeroAddress(_rsETHOracle);
-
         rsETHOracle = _rsETHOracle;
-
         emit OracleSet(_rsETHOracle);
     }
 
@@ -271,7 +391,7 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         if (supportedTokenOracle[token] != address(0)) {
             revert AlreadySupportedToken();
         }
-        if (IOracle(rsETHOracle).getRate() == 0) {
+        if (IOracle(oracle).getRate() == 0) {
             revert UnsupportedOracle();
         }
         supportedTokenList.push(token);
@@ -291,5 +411,27 @@ contract RSETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         supportedTokenList[tokenIndex] = supportedTokenList[supportedTokenList.length - 1];
         supportedTokenList.pop();
         emit RemovedSupportedToken(token);
+    }
+
+    /// @dev Pauses the pausable methods in the contract
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @dev Unpauses the pausable methods in the contract
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    /// @dev Sets the daily minting limit
+    /// @param _dailyMintLimit The new daily minting limit
+    function setDailyMintLimit(uint256 _dailyMintLimit) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_dailyMintLimit == 0) {
+            revert InvalidDailyMintLimit();
+        }
+        dailyMintLimit = _dailyMintLimit;
+        emit DailyMintLimitSet(_dailyMintLimit);
     }
 }

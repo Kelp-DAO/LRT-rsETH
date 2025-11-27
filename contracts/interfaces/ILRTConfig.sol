@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 interface ILRTConfig {
     // Errors
@@ -12,8 +12,13 @@ interface ILRTConfig {
     error CallerNotLRTConfigAllowedRole(string role);
     error CannotUpdateStrategyAsItHasFundsNDCFunds(address ndc, uint256 amount);
     error InvalidMaxRewardAmount();
+    error ProtocolFeeExceedsLimit();
+    error CannotRemoveAssetWithDeposits(address asset);
+    error TokenNotFoundError();
+    error InvalidDepositLimit();
 
     // Events
+
     event SetToken(bytes32 key, address indexed tokenAddr);
     event SetContract(bytes32 key, address indexed contractAddr);
     event AddedNewSupportedAsset(address indexed asset, uint256 depositLimit);
@@ -22,6 +27,9 @@ interface ILRTConfig {
     event AssetStrategyUpdate(address indexed asset, address indexed strategy);
     event SetRSETH(address indexed rsETH);
     event UpdateMaxRewardAmount(uint256 maxRewardAmount);
+    event MaxNegligibleAmountUpdated(uint256 maxNegligibleAmount);
+    event UpdateFee(uint256 newFee);
+    event SetEigenLayerRewardReceiver(address indexed eigenLayerRewardReceiver);
 
     // methods
 
@@ -40,4 +48,6 @@ interface ILRTConfig {
     function depositLimitByAsset(address asset) external view returns (uint256);
 
     function protocolFeeInBPS() external view returns (uint256);
+
+    function eigenLayerRewardReceiver() external view returns (address);
 }
