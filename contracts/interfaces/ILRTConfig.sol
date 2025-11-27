@@ -6,6 +6,7 @@ interface ILRTConfig {
     error ValueAlreadyInUse();
     error AssetAlreadySupported();
     error AssetNotSupported();
+    error ETHNotSupported();
     error CallerNotLRTConfigAdmin();
     error CallerNotLRTConfigManager();
     error CallerNotLRTConfigOperator();

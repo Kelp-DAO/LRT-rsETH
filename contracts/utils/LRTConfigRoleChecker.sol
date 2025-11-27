@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.27;
 
-import { LRTConstants } from "./LRTConstants.sol";
+import {LRTConstants} from "./LRTConstants.sol";
 
-import { ILRTConfig } from "../interfaces/ILRTConfig.sol";
+import {ILRTConfig} from "../interfaces/ILRTConfig.sol";
 
-import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {
+    IAccessControl
+} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /// @title LRTConfigRoleChecker - LRT Config Role Checker Contract
 /// @notice Handles LRT config role checks
@@ -25,21 +27,36 @@ abstract contract LRTConfigRoleChecker {
     }
 
     modifier onlyLRTManager() {
-        if (!IAccessControl(address(lrtConfig)).hasRole(LRTConstants.MANAGER, msg.sender)) {
+        if (
+            !IAccessControl(address(lrtConfig)).hasRole(
+                LRTConstants.MANAGER,
+                msg.sender
+            )
+        ) {
             revert ILRTConfig.CallerNotLRTConfigManager();
         }
         _;
     }
 
     modifier onlyLRTOperator() {
-        if (!IAccessControl(address(lrtConfig)).hasRole(LRTConstants.OPERATOR_ROLE, msg.sender)) {
+        if (
+            !IAccessControl(address(lrtConfig)).hasRole(
+                LRTConstants.OPERATOR_ROLE,
+                msg.sender
+            )
+        ) {
             revert ILRTConfig.CallerNotLRTConfigOperator();
         }
         _;
     }
 
     modifier onlyLRTAdmin() {
-        if (!IAccessControl(address(lrtConfig)).hasRole(LRTConstants.DEFAULT_ADMIN_ROLE, msg.sender)) {
+        if (
+            !IAccessControl(address(lrtConfig)).hasRole(
+                LRTConstants.DEFAULT_ADMIN_ROLE,
+                msg.sender
+            )
+        ) {
             revert ILRTConfig.CallerNotLRTConfigAdmin();
         }
         _;
@@ -48,6 +65,16 @@ abstract contract LRTConfigRoleChecker {
     modifier onlySupportedAsset(address asset) {
         if (!lrtConfig.isSupportedAsset(asset)) {
             revert ILRTConfig.AssetNotSupported();
+        }
+        _;
+    }
+
+    modifier onlySupportedERC20Token(address asset) {
+        if (!lrtConfig.isSupportedAsset(asset)) {
+            revert ILRTConfig.AssetNotSupported();
+        }
+        if (asset == LRTConstants.ETH_TOKEN) {
+            revert ILRTConfig.ETHNotSupported();
         }
         _;
     }

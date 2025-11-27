@@ -199,9 +199,9 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
     function processClaim(IRewardsCoordinator.RewardsMerkleClaim calldata claim)
         external
+        nonReentrant
         onlyLRTOperator
         whenNotPaused
-        nonReentrant
     {
         IRewardsCoordinator(lrtConfig.rewardsCoordinator()).processClaim(claim, lrtConfig.eigenLayerRewardReceiver());
     }
@@ -341,6 +341,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @param assets Array specifying the `token` input for each strategy's 'withdraw' function.
     /// @param receiveAsTokens Whether or not to complete each withdrawal as tokens. See `completeQueuedWithdrawal` for
     /// the usage of a single boolean.
+    // solhint-disable-next-line code-complexity
     function completeUnstaking(
         IDelegationManager.Withdrawal calldata withdrawal,
         IERC20[] calldata assets,
@@ -362,6 +363,13 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         }
 
         for (uint256 i; i < assetCount; i++) {
+            if (lrtConfig.beaconChainETHStrategy() == address(withdrawal.strategies[i])) {
+                if (address(assets[i]) != LRTConstants.ETH_TOKEN) {
+                    revert StrategyAndAssetTokenMismatch();
+                }
+                continue;
+            }
+
             if (address(assets[i]) != address(withdrawal.strategies[i].underlyingToken())) {
                 revert StrategyAndAssetTokenMismatch();
             }
@@ -404,7 +412,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @notice Returns the amount of a specific asset currently being unstaked
     /// @param asset The address of the asset to check
     /// @return amount The total amount of the asset being unstaked
-    function getAssetUnstaking(address asset) public view returns (uint256 amount) {
+    function getAssetUnstaking(address asset) external view returns (uint256 amount) {
         (IDelegationManager.Withdrawal[] memory queuedWithdrawals, uint256[][] memory withdrawalShares) =
             _getDelegationManager().getQueuedWithdrawals(address(this));
 
@@ -515,14 +523,17 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         onlySupportedAsset(asset)
         onlyLRTManager
     {
-        IERC20(asset).approve(lrtConfig.strategyManager(), type(uint256).max);
+        if (asset == LRTConstants.ETH_TOKEN) {
+            revert ILRTConfig.AssetNotSupported();
+        }
+        IERC20(asset).forceApprove(lrtConfig.strategyManager(), type(uint256).max);
     }
 
     /// @notice Revokes the approval of an asset to the eigen strategy manager
     /// @dev can only b called by the LRT manager
     /// @param asset the asset to revoke approval for
     function revokeApprovalToEigenStrategyManager(address asset) external override onlyLRTManager {
-        IERC20(asset).approve(lrtConfig.strategyManager(), 0);
+        IERC20(asset).forceApprove(lrtConfig.strategyManager(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
