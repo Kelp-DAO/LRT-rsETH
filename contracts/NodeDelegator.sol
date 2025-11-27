@@ -1,39 +1,47 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity 0.8.27;
 
 // openzeppelin or other standard contracts
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 // external libraries, interfaces, contracts
 import { IEigenPod } from "./external/eigenlayer/interfaces/IEigenPod.sol";
-import { IEigenStrategyManager } from "./external/eigenlayer/interfaces/IEigenStrategyManager.sol";
+import { IStrategyManager } from "./external/eigenlayer/interfaces/IStrategyManager.sol";
 import { IEigenPodManager, IETHPOSDeposit } from "./external/eigenlayer/interfaces/IEigenPodManager.sol";
-import { IDelegationManager } from "./external/eigenlayer/interfaces/IDelegationManager.sol";
 
 // protocol libraries, interfaces, contracts
 import { UtilLib } from "./utils/UtilLib.sol";
+
 import { LRTConstants } from "./utils/LRTConstants.sol";
 import { LRTConfigRoleChecker } from "./utils/LRTConfigRoleChecker.sol";
 
 import { ILRTConfig } from "./interfaces/ILRTConfig.sol";
 import { IPubkeyRegistry } from "./interfaces/IPubkeyRegistry.sol";
-import { INodeDelegator, BeaconChainProofs, IERC20, IStrategy } from "./interfaces/INodeDelegator.sol";
+import {
+    INodeDelegator,
+    BeaconChainProofs,
+    IERC20,
+    IStrategy,
+    IRewardsCoordinator,
+    IDelegationManagerTypes
+} from "./interfaces/INodeDelegator.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
+import { NodeDelegatorHelper } from "./NodeDelegatorHelper.sol";
+import { IDelegationManager } from "contracts/external/eigenlayer/interfaces/IDelegationManager.sol";
 
 /// @title NodeDelegator Contract
 /// @notice The contract that handles the depositing of assets into strategies
 contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
+    using LRTConstants for ILRTConfig;
 
     /// @dev The EigenPod is created and owned by this contract
     IEigenPod public eigenPod;
 
     /// @dev Tracks the balance staked to validators and has yet to have the credentials verified with EigenLayer.
-    /// call verifyWithdrawalCredentialsAndBalance in EL to verify the validator credentials on EigenLayer
     uint256 public stakedButUnverifiedNativeETH;
 
     /// @dev address of eigenlayer operator to which all restaked funds are delegated to
@@ -44,13 +52,6 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     uint256 private __legacyExtraStakeToReceive;
 
     uint256 private lastNonce;
-
-    modifier onlyWhenWithdrawalsAccounted() {
-        if (!hasAllWithdrawalsAccounted()) {
-            revert ForcedOperatorUndelegation();
-        }
-        _;
-    }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -65,11 +66,12 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         __ReentrancyGuard_init();
 
         lrtConfig = ILRTConfig(lrtConfigAddr);
+
         emit UpdatedLRTConfig(lrtConfigAddr);
     }
 
     function initialize2() external reinitializer(2) {
-        lastNonce = getNonce();
+        lastNonce = _getNonce();
     }
 
     /// @dev due to a bit heavy logic, eth transfer using `transfer()` and `send()` will fail
@@ -83,7 +85,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Deposits an asset lying in this NDC into its strategy
-    /// @dev only supported assets can be deposited and only called by the LRT manager
+    /// @dev only supported assets can be deposited and only called by the LRT operator
     /// @param asset the asset to deposit
     function depositAssetIntoStrategy(address asset)
         external
@@ -91,7 +93,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         nonReentrant
         whenNotPaused
         onlySupportedAsset(asset)
-        onlyLRTManager
+        onlyLRTOperator
     {
         address strategy = lrtConfig.assetStrategy(asset);
         if (strategy == address(0)) {
@@ -99,11 +101,10 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         }
 
         IERC20 token = IERC20(asset);
-        address eigenlayerStrategyManagerAddress = lrtConfig.getContract(LRTConstants.EIGEN_STRATEGY_MANAGER);
 
         uint256 balance = token.balanceOf(address(this));
 
-        IEigenStrategyManager(eigenlayerStrategyManagerAddress).depositIntoStrategy(IStrategy(strategy), token, balance);
+        IStrategyManager(lrtConfig.strategyManager()).depositIntoStrategy(IStrategy(strategy), token, balance);
 
         emit AssetDepositIntoStrategy(asset, strategy, balance);
     }
@@ -115,16 +116,14 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @dev delegationManager.delegateTo will check if the operator is valid, if ndc is already delegated to
     function delegateTo(
         address elOperator,
-        IDelegationManager.SignatureWithExpiry memory approverSignatureAndExpiry,
+        IDelegationManager.SignatureWithExpiry calldata approverSignatureAndExpiry,
         bytes32 approverSalt
     )
         external
         onlyLRTManager
     {
         UtilLib.checkNonZeroAddress(elOperator);
-        IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER)).delegateTo(
-            elOperator, approverSignatureAndExpiry, approverSalt
-        );
+        _getDelegationManager().delegateTo(elOperator, approverSignatureAndExpiry, approverSalt);
         emit ElSharesDelegated(elOperator);
     }
 
@@ -134,10 +133,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
      * @dev Sets EigenPod address
      */
     function createEigenPod() external onlyLRTManager {
-        IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
-
-        eigenPod = IEigenPod(eigenPodManager.createPod());
-
+        eigenPod = IEigenPod(_getEigenPodManager().createPod());
         emit EigenPodCreated(address(eigenPod), address(this));
     }
 
@@ -158,7 +154,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         whenNotPaused
         onlyLRTOperator
     {
-        IPubkeyRegistry pubkeyRegistry = IPubkeyRegistry(lrtConfig.getContract(LRTConstants.PUBKEY_REGISTRY));
+        IPubkeyRegistry pubkeyRegistry = IPubkeyRegistry(lrtConfig.pubkeyRegistry());
         if (pubkeyRegistry.hasPubkey(pubkey)) {
             revert PubkeyAlreadyRegistered();
         }
@@ -167,11 +163,10 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         // tracks staked but unverified native ETH
         stakedButUnverifiedNativeETH += 32 ether;
 
-        IEigenPodManager eigenPodManager = IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER));
-        eigenPodManager.stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
+        _getEigenPodManager().stake{ value: 32 ether }(pubkey, signature, depositDataRoot);
 
         if (address(eigenPod) == address(0)) {
-            eigenPod = eigenPodManager.ownerToPod(address(this));
+            eigenPod = _getEigenPodManager().ownerToPod(address(this));
             emit EigenPodCreated(address(eigenPod), address(this));
         }
         emit ETHStaked(pubkey, 32 ether);
@@ -193,16 +188,22 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         bytes32 expectedDepositRoot
     )
         external
-        whenNotPaused
-        onlyLRTOperator
     {
-        IETHPOSDeposit depositContract =
-            IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER)).ethPOS();
+        IETHPOSDeposit depositContract = _getEigenPodManager().ethPOS();
         bytes32 actualDepositRoot = depositContract.get_deposit_root();
         if (expectedDepositRoot != actualDepositRoot) {
             revert InvalidDepositRoot(expectedDepositRoot, actualDepositRoot);
         }
         stake32Eth(pubkey, signature, depositDataRoot);
+    }
+
+    function processClaim(IRewardsCoordinator.RewardsMerkleClaim calldata claim)
+        external
+        nonReentrant
+        onlyLRTOperator
+        whenNotPaused
+    {
+        IRewardsCoordinator(lrtConfig.rewardsCoordinator()).processClaim(claim, lrtConfig.eigenLayerRewardReceiver());
     }
 
     /**
@@ -229,6 +230,10 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         external
         onlyLRTOperator
     {
+        if (stakedButUnverifiedNativeETH < validatorFields.length * (32 ether)) {
+            revert InsufficientStakedBalance();
+        }
+
         // reduce the eth amount that is verified
         stakedButUnverifiedNativeETH -= (validatorFields.length * (32 ether));
 
@@ -255,36 +260,28 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
     /// @notice undelegates from operator and removes all currently active shares
     function undelegate() external whenNotPaused onlyLRTManager {
-        IDelegationManager elDelegationManager =
-            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
-        ILRTUnstakingVault lrtUnstakingVault =
-            ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT));
-        address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
-
-        // Gather strategies and shares which will be removed from staker/operator during undelegation
-        (IStrategy[] memory strategies, uint256[] memory shares) =
-            elDelegationManager.getDelegatableShares(address(this));
-
-        // update shares unstaking in LRT unstaking vault
-        for (uint256 i = 0; i < strategies.length;) {
-            if (beaconChainETHStrategy == address(strategies[i])) {
-                lrtUnstakingVault.addSharesUnstaking(LRTConstants.ETH_TOKEN, shares[i]);
-            } else {
-                address token = address(strategies[i].underlyingToken());
-                lrtUnstakingVault.addSharesUnstaking(token, shares[i]);
-            }
-            unchecked {
-                ++i;
-            }
+        if (elOperatorDelegatedTo() == address(0)) {
+            revert CantUndelegate();
         }
 
-        uint256 nonce = getNonce();
-        bytes32[] memory withdrawalRoots = elDelegationManager.undelegate(address(this));
-        lastNonce = lastNonce + getNonce() - nonce;
-        for (uint256 i = 0; i < withdrawalRoots.length; i++) {
-            lrtUnstakingVault.trackWithdrawal(withdrawalRoots[i]);
+        bytes32[] memory withdrawalRoots = _getDelegationManager().undelegate(address(this));
+
+        if (
+            _getUnstakingVault().uncompletedWithdrawalCount() + withdrawalRoots.length
+                > _getUnstakingVault().maxUncompletedWithdrawalCount()
+        ) {
+            revert MaxUncompletedWithdrawalsReached();
         }
-        emit WithdrawalQueued(nonce, address(this), withdrawalRoots);
+
+        for (uint256 i; i < withdrawalRoots.length; i++) {
+            _getUnstakingVault().increaseUncompletedWithdrawalCount();
+
+            // NOTE: For legacy event emission we emit single withdrawal roots
+            bytes32[] memory singleWithdrawal = new bytes32[](1);
+            singleWithdrawal[0] = withdrawalRoots[i];
+            emit WithdrawalQueued(_getNonce() - withdrawalRoots.length + i, address(this), singleWithdrawal);
+        }
+
         emit Undelegated();
     }
 
@@ -302,124 +299,157 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         onlyLRTOperator
         returns (bytes32 withdrawalRoot)
     {
-        IDelegationManager.QueuedWithdrawalParams memory queuedWithdrawalParam = IDelegationManager
-            .QueuedWithdrawalParams({ strategies: strategies, shares: shares, withdrawer: address(this) });
+        if (_getUnstakingVault().uncompletedWithdrawalCount() >= _getUnstakingVault().maxUncompletedWithdrawalCount()) {
+            revert MaxUncompletedWithdrawalsReached();
+        }
+        if (strategies.length == 0) {
+            revert ZeroLengthArray();
+        }
 
-        address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
+        if (strategies.length != shares.length) {
+            revert ArrayLengthMismatch();
+        }
 
-        ILRTUnstakingVault lrtUnstakingVault =
-            ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT));
-        for (uint256 i = 0; i < queuedWithdrawalParam.strategies.length;) {
-            if (beaconChainETHStrategy == address(queuedWithdrawalParam.strategies[i])) {
-                lrtUnstakingVault.addSharesUnstaking(LRTConstants.ETH_TOKEN, queuedWithdrawalParam.shares[i]);
-            } else {
-                address token = address(queuedWithdrawalParam.strategies[i].underlyingToken());
-                address strategy = lrtConfig.assetStrategy(token);
-
-                if (strategy != address(queuedWithdrawalParam.strategies[i])) {
-                    revert StrategyIsNotSetForAsset();
-                }
-                lrtUnstakingVault.addSharesUnstaking(token, queuedWithdrawalParam.shares[i]);
-            }
-
-            unchecked {
-                ++i;
+        for (uint256 i = 0; i < strategies.length; i++) {
+            if (!NodeDelegatorHelper.isSupportedStrategy(lrtConfig, strategies[i])) {
+                revert StrategyIsNotSetForAsset();
             }
         }
-        IDelegationManager elDelegationManager =
-            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
 
         IDelegationManager.QueuedWithdrawalParams[] memory queuedWithdrawalParams =
             new IDelegationManager.QueuedWithdrawalParams[](1);
-        queuedWithdrawalParams[0] = queuedWithdrawalParam;
-        uint256 nonce = getNonce();
-        bytes32[] memory withdrawalRoots = elDelegationManager.queueWithdrawals(queuedWithdrawalParams);
-        lastNonce = lastNonce + 1;
+        queuedWithdrawalParams[0] = IDelegationManagerTypes.QueuedWithdrawalParams({
+            strategies: strategies,
+            depositShares: shares,
+            withdrawer: address(this)
+        });
+
+        bytes32[] memory withdrawalRoots = _getDelegationManager().queueWithdrawals(queuedWithdrawalParams);
         withdrawalRoot = withdrawalRoots[0];
-        lrtUnstakingVault.trackWithdrawal(withdrawalRoot);
-        emit WithdrawalQueued(nonce, address(this), withdrawalRoots);
+        emit WithdrawalQueued(_getNonce() - 1, address(this), withdrawalRoots);
     }
 
     /// @notice Finalizes Eigenlayer withdrawal to enable processing of queued withdrawals
     /// @param withdrawal Struct containing all data for the withdrawal
     /// @param assets Array specifying the `token` input for each strategy's 'withdraw' function.
-    /// @param middlewareTimesIndex Index in the middleware times array for withdrawal eligibility check.
-    function completeUnstaking(
-        IDelegationManager.Withdrawal calldata withdrawal,
-        IERC20[] calldata assets,
-        uint256 middlewareTimesIndex
-    )
-        external
-    {
-        completeUnstaking(withdrawal, assets, middlewareTimesIndex, true);
+    function completeUnstaking(IDelegationManager.Withdrawal calldata withdrawal, IERC20[] calldata assets) external {
+        completeUnstaking(withdrawal, assets, true);
     }
 
     /// @notice Finalizes Eigenlayer withdrawal to enable processing of queued withdrawals
     /// @param withdrawal Struct containing all data for the withdrawal
     /// @param assets Array specifying the `token` input for each strategy's 'withdraw' function.
-    /// @param middlewareTimesIndex Index in the middleware times array for withdrawal eligibility check.
     /// @param receiveAsTokens Whether or not to complete each withdrawal as tokens. See `completeQueuedWithdrawal` for
     /// the usage of a single boolean.
+    // solhint-disable-next-line code-complexity
     function completeUnstaking(
         IDelegationManager.Withdrawal calldata withdrawal,
         IERC20[] calldata assets,
-        uint256 middlewareTimesIndex,
         bool receiveAsTokens
     )
         public
         nonReentrant
         whenNotPaused
         onlyLRTOperator
-        onlyWhenWithdrawalsAccounted
     {
+        if (withdrawal.staker != address(this)) {
+            revert InvalidWithdrawalStaker();
+        }
+
         uint256 assetCount = assets.length;
-        if (assetCount == 0 || assetCount != withdrawal.shares.length) {
+        if (assetCount == 0 || assetCount != withdrawal.scaledShares.length) {
             // asset length and strategies length is checked by eigenlayer contracts in `completeQueuedWithdrawal`
             revert InvalidWithdrawalData();
         }
 
-        address elDelegationManagerAddr = lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER);
-        address beaconChainETHStrategy = lrtConfig.getContract(LRTConstants.BEACON_CHAIN_ETH_STRATEGY);
-        address lrtUnstakingVaultAddr = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
-
-        ILRTUnstakingVault lrtUnstakingVault = ILRTUnstakingVault(lrtUnstakingVaultAddr);
-
-        uint256[] memory balancesBefore = new uint256[](assetCount);
-        for (uint256 i = 0; i < assetCount;) {
-            if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
-                lrtUnstakingVault.reduceSharesUnstaking(address(assets[i]), withdrawal.shares[i]);
-            } else {
-                lrtUnstakingVault.reduceSharesUnstaking(LRTConstants.ETH_TOKEN, withdrawal.shares[i]);
-            }
-            if (receiveAsTokens) {
-                if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
-                    balancesBefore[i] = assets[i].balanceOf(address(this));
-                } else {
-                    balancesBefore[i] = address(this).balance;
+        for (uint256 i; i < assetCount; i++) {
+            if (lrtConfig.beaconChainETHStrategy() == address(withdrawal.strategies[i])) {
+                if (address(assets[i]) != LRTConstants.ETH_TOKEN) {
+                    revert StrategyAndAssetTokenMismatch();
                 }
+                continue;
             }
-            unchecked {
-                i++;
+
+            if (address(assets[i]) != address(withdrawal.strategies[i].underlyingToken())) {
+                revert StrategyAndAssetTokenMismatch();
             }
         }
 
+        uint256[] memory balancesBefore = getBalances(assets);
+
         // Finalize withdrawal with Eigenlayer Delegation Manager
-        IDelegationManager(elDelegationManagerAddr).completeQueuedWithdrawal(
-            withdrawal, assets, middlewareTimesIndex, receiveAsTokens
-        );
-        if (receiveAsTokens) {
-            for (uint256 i = 0; i < assetCount;) {
-                if (address(beaconChainETHStrategy) != address(withdrawal.strategies[i])) {
-                    uint256 amount = assets[i].balanceOf(address(this)) - balancesBefore[i];
-                    assets[i].transfer(lrtUnstakingVaultAddr, amount);
+        _getDelegationManager().completeQueuedWithdrawal(withdrawal, assets, receiveAsTokens);
+        // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
+        if (withdrawal.nonce < lastNonce) {
+            for (uint256 i; i < assetCount; i++) {
+                if (lrtConfig.beaconChainETHStrategy() != address(withdrawal.strategies[i])) {
+                    _getUnstakingVault().reduceSharesUnstaking(
+                        address(withdrawal.strategies[i].underlyingToken()), withdrawal.scaledShares[i]
+                    );
+                } else {
+                    _getUnstakingVault().reduceSharesUnstaking(LRTConstants.ETH_TOKEN, withdrawal.scaledShares[i]);
                 }
-                unchecked {
-                    i++;
+            }
+        } else {
+            _getUnstakingVault().decreaseUncompletedWithdrawalCount();
+        }
+        if (receiveAsTokens) {
+            for (uint256 i; i < assetCount; i++) {
+                if (address(assets[i]) == LRTConstants.ETH_TOKEN) {
+                    emit EthTransferred(address(_getUnstakingVault()), address(this).balance - balancesBefore[i]);
+                    _getUnstakingVault().receiveFromNodeDelegator{ value: address(this).balance - balancesBefore[i] }();
+                } else {
+                    assets[i].safeTransfer(
+                        address(_getUnstakingVault()), assets[i].balanceOf(address(this)) - balancesBefore[i]
+                    );
                 }
             }
         }
 
         emit EigenLayerWithdrawalCompleted(withdrawal.staker, withdrawal.nonce, msg.sender);
+    }
+
+    /// @notice Returns the amount of a specific asset currently being unstaked
+    /// @param asset The address of the asset to check
+    /// @return amount The total amount of the asset being unstaked
+    function getAssetUnstaking(address asset) external view returns (uint256 amount) {
+        (IDelegationManager.Withdrawal[] memory queuedWithdrawals, uint256[][] memory withdrawalShares) =
+            _getDelegationManager().getQueuedWithdrawals(address(this));
+
+        for (uint256 withdrawalIndex = 0; withdrawalIndex < queuedWithdrawals.length; withdrawalIndex++) {
+            IDelegationManager.Withdrawal memory withdrawal = queuedWithdrawals[withdrawalIndex];
+
+            // Note: This can be removed after lastNonce is initilized, onlySupportedAsset should check this
+            if (withdrawal.nonce < lastNonce) {
+                continue;
+            }
+
+            for (uint256 strategyIndex = 0; strategyIndex < withdrawal.strategies.length; strategyIndex++) {
+                IStrategy strategy = withdrawal.strategies[strategyIndex];
+
+                address strategyAsset = address(strategy) == address(lrtConfig.beaconChainETHStrategy())
+                    ? LRTConstants.ETH_TOKEN
+                    : address(strategy.underlyingToken());
+
+                if (strategyAsset != asset) continue;
+
+                uint256 sharesToUnstake = withdrawalShares[withdrawalIndex][strategyIndex];
+                amount += strategyAsset == LRTConstants.ETH_TOKEN
+                    ? sharesToUnstake
+                    : strategy.sharesToUnderlyingView(sharesToUnstake);
+            }
+        }
+    }
+
+    function getBalances(IERC20[] memory assets) internal view returns (uint256[] memory balances) {
+        balances = new uint256[](assets.length);
+        for (uint256 i; i < assets.length; i++) {
+            if (address(assets[i]) == LRTConstants.ETH_TOKEN) {
+                balances[i] = address(this).balance;
+            } else {
+                balances[i] = assets[i].balanceOf(address(this));
+            }
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -429,7 +459,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @notice Sends ETH from the LRT deposit pool to this contract
     function sendETHFromDepositPoolToNDC() external payable override {
         // only allow LRT deposit pool to send ETH to this contract
-        if (msg.sender != lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL)) {
+        if (msg.sender != lrtConfig.depositPool()) {
             revert InvalidETHSender();
         }
 
@@ -439,7 +469,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @notice Sends ETH from the LRT Unstaking Vault to this contract
     function sendETHFromUnstakingVaultToNDC() external payable override {
         // only allow LRT deposit pool to send ETH to this contract
-        if (msg.sender != lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)) {
+        if (msg.sender != lrtConfig.unstakingVault()) {
             revert InvalidETHSender();
         }
         emit ETHDepositFromUnstakingVault(msg.value);
@@ -459,13 +489,16 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         onlySupportedAsset(asset)
         onlyLRTOperator
     {
-        address lrtDepositPool = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
+        address lrtDepositPool = lrtConfig.depositPool();
 
         if (asset == LRTConstants.ETH_TOKEN) {
             ILRTDepositPool(lrtDepositPool).receiveFromNodeDelegator{ value: amount }();
+
             emit EthTransferred(lrtDepositPool, amount);
         } else {
             IERC20(asset).safeTransfer(lrtDepositPool, amount);
+
+            emit AssetTransferred(asset, lrtDepositPool, amount);
         }
     }
 
@@ -473,9 +506,8 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     /// @dev only supported assets can be transferred and only called by the LRT manager
     /// @param amount the amount to transfer
     function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant whenNotPaused onlyLRTOperator {
-        address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
-        ILRTUnstakingVault(lrtUnstakingVault).receiveFromNodeDelegator{ value: amount }();
-        emit EthTransferred(lrtUnstakingVault, amount);
+        _getUnstakingVault().receiveFromNodeDelegator{ value: amount }();
+        emit EthTransferred(address(_getUnstakingVault()), amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -491,8 +523,17 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         onlySupportedAsset(asset)
         onlyLRTManager
     {
-        address eigenlayerStrategyManagerAddress = lrtConfig.getContract(LRTConstants.EIGEN_STRATEGY_MANAGER);
-        IERC20(asset).approve(eigenlayerStrategyManagerAddress, type(uint256).max);
+        if (asset == LRTConstants.ETH_TOKEN) {
+            revert ILRTConfig.AssetNotSupported();
+        }
+        IERC20(asset).forceApprove(lrtConfig.strategyManager(), type(uint256).max);
+    }
+
+    /// @notice Revokes the approval of an asset to the eigen strategy manager
+    /// @dev can only b called by the LRT manager
+    /// @param asset the asset to revoke approval for
+    function revokeApprovalToEigenStrategyManager(address asset) external override onlyLRTManager {
+        IERC20(asset).forceApprove(lrtConfig.strategyManager(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -509,57 +550,47 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         _unpause();
     }
 
-    function increaseLastNonce() external override {
-        if (lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT) != msg.sender) {
-            revert CallerNotLRTUnstakingVault();
-        }
-        lastNonce = lastNonce + 1;
-    }
-
     /*//////////////////////////////////////////////////////////////
                             View Functions
     //////////////////////////////////////////////////////////////*/
-    function hasAllWithdrawalsAccounted() public view override returns (bool) {
-        return (getNonce() == lastNonce);
-    }
-
-    /// @notice Fetches balance of all assets staked in eigen layer through this contract
-    /// @return assets the assets that the node delegator has deposited into strategies
-    /// @return assetBalances the balances of the assets that the node delegator has deposited into strategies
-    function getAssetBalances() external view override returns (address[] memory, uint256[] memory) {
-        return ILRTUnstakingVault(lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)).getStakedAssetBalances(
-            address(this)
-        );
-    }
 
     /// @dev Returns the balance of an asset that the node delegator has deposited into the strategy
     /// @param asset the asset to get the balance of
     /// @return stakedBalance the balance of the asset
     function getAssetBalance(address asset) external view override returns (uint256) {
-        address strategy = lrtConfig.assetStrategy(asset);
-        if (strategy == address(0)) {
-            return 0;
-        }
-
-        return IStrategy(strategy).userUnderlyingView(address(this));
+        return NodeDelegatorHelper.getAssetBalance(lrtConfig, asset);
     }
 
     /// @dev Returns the amount of eth staked in eigenlayer through this ndc
-    function getEffectivePodShares() external view override returns (int256 ethStaked) {
-        int256 nativeEthShares =
-            IEigenPodManager(lrtConfig.getContract(LRTConstants.EIGEN_POD_MANAGER)).podOwnerShares(address(this));
+    function getEffectivePodShares() external view override returns (uint256 ethStaked) {
+        uint256 withdrawableShare =
+            NodeDelegatorHelper.getWithdrawableShare(lrtConfig, IStrategy(lrtConfig.beaconChainETHStrategy()));
 
-        // if the below sum becomes negative, it will be balanced by sharesUnstaking when computing total TVL
-        return SafeCast.toInt256(stakedButUnverifiedNativeETH) + nativeEthShares;
+        // staker balances can no longer be negative
+        return stakedButUnverifiedNativeETH + withdrawableShare;
     }
 
-    function elOperatorDelegatedTo() external view override returns (address) {
-        return
-            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER)).delegatedTo(address(this));
+    function elOperatorDelegatedTo() public view override returns (address) {
+        return _getDelegationManager().delegatedTo(address(this));
     }
 
-    function getNonce() internal view returns (uint256) {
-        return IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER))
-            .cumulativeWithdrawalsQueued(address(this));
+    /*//////////////////////////////////////////////////////////////
+                            Internal Functions
+    //////////////////////////////////////////////////////////////*/
+
+    function _getUnstakingVault() internal view returns (ILRTUnstakingVault) {
+        return ILRTUnstakingVault(lrtConfig.unstakingVault());
+    }
+
+    function _getDelegationManager() internal view returns (IDelegationManager) {
+        return IDelegationManager(lrtConfig.delegationManager());
+    }
+
+    function _getEigenPodManager() internal view returns (IEigenPodManager) {
+        return IEigenPodManager(lrtConfig.eigenPodManager());
+    }
+
+    function _getNonce() internal view returns (uint256) {
+        return _getDelegationManager().cumulativeWithdrawalsQueued(address(this));
     }
 }

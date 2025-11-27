@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.21;
+pragma solidity ^0.8.27;
 
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
@@ -21,6 +21,8 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     address[] public supportedAssetList;
     address public rsETH;
     uint256 public protocolFeeInBPS;
+    address public eigenLayerRewardReceiver;
+    uint256 public maxNegligibleAmount;
 
     modifier onlySupportedAsset(address asset) {
         if (!isSupportedAsset[asset]) {
@@ -54,10 +56,42 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
         rsETH = rsETH_;
     }
 
+    /// @dev Removes a supported asset
+    /// @param asset The asset address
+    function removeSupportedAsset(
+        address asset,
+        uint256 tokenIndex
+    )
+        external
+        onlySupportedAsset(asset)
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        UtilLib.checkNonZeroAddress(asset);
+
+        if (supportedAssetList[tokenIndex] != asset) {
+            revert TokenNotFoundError();
+        }
+
+        address depositPool = getContract(LRTConstants.LRT_DEPOSIT_POOL);
+
+        if (ILRTDepositPool(depositPool).getTotalAssetDeposits(asset) > maxNegligibleAmount) {
+            revert CannotRemoveAssetWithDeposits(asset);
+        }
+
+        delete isSupportedAsset[asset];
+        delete assetStrategy[asset];
+        depositLimitByAsset[asset] = 0;
+
+        supportedAssetList[tokenIndex] = supportedAssetList[supportedAssetList.length - 1];
+        supportedAssetList.pop();
+
+        emit RemovedSupportedAsset(asset);
+    }
+
     /// @dev Adds a new supported asset
     /// @param asset Asset address
     /// @param depositLimit Deposit limit for the asset
-    function addNewSupportedAsset(address asset, uint256 depositLimit) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function addNewSupportedAsset(address asset, uint256 depositLimit) external onlyRole(LRTConstants.TIME_LOCK_ROLE) {
         _addNewSupportedAsset(asset, depositLimit);
     }
 
@@ -66,6 +100,9 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     /// @param depositLimit Deposit limit for the asset
     function _addNewSupportedAsset(address asset, uint256 depositLimit) private {
         UtilLib.checkNonZeroAddress(asset);
+        if (depositLimit == 0) {
+            revert InvalidDepositLimit();
+        }
         if (isSupportedAsset[asset]) {
             revert AssetAlreadySupported();
         }
@@ -151,8 +188,21 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
 
     /// @dev Set the protocol fee bps
     /// @param _protocolFeeInBPS protocol fee bps
-    function setProtocolFeeBps(uint256 _protocolFeeInBPS) external onlyRole(LRTConstants.DEFAULT_ADMIN_ROLE) {
+    function setProtocolFeeBps(uint256 _protocolFeeInBPS) external onlyRole(LRTConstants.MANAGER) {
+        if (_protocolFeeInBPS > 1500) revert ProtocolFeeExceedsLimit();
         protocolFeeInBPS = _protocolFeeInBPS;
+        emit UpdateFee(_protocolFeeInBPS);
+    }
+
+    /// @dev Set the el reward receiver fee bps
+    /// @param _eigenLayerRewardReceiver reciver of weekly el rewards
+    function setEigenLayerRewardReceiver(address _eigenLayerRewardReceiver)
+        external
+        onlyRole(LRTConstants.DEFAULT_ADMIN_ROLE)
+    {
+        UtilLib.checkNonZeroAddress(_eigenLayerRewardReceiver);
+        eigenLayerRewardReceiver = _eigenLayerRewardReceiver;
+        emit SetEigenLayerRewardReceiver(_eigenLayerRewardReceiver);
     }
 
     /// @dev Sets the rsETH contract address. Only callable by the admin
@@ -193,5 +243,13 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
         }
         contractMap[key] = val;
         emit SetContract(key, val);
+    }
+
+    /// @notice maximum amount that can be ignored
+    /// @dev only callable by LRT admin
+    /// @param maxNegligibleAmount_ Maximum amount that can be ignored
+    function setMaxNegligibleAmount(uint256 maxNegligibleAmount_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        maxNegligibleAmount = maxNegligibleAmount_;
+        emit MaxNegligibleAmountUpdated(maxNegligibleAmount_);
     }
 }
