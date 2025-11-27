@@ -127,7 +127,7 @@ contract LRTOracle is ILRTOracle, LRTConfigRoleChecker, Initializable {
 
         // mint protocol fee as rsETH if there's a fee to take
         if (protocolFeeInETH > 0) {
-            uint256 rsethAmountToMintAsProtocolFee = (protocolFeeInETH * 1e18) / newRsETHPrice;
+            uint256 rsethAmountToMintAsProtocolFee = protocolFeeInETH / newRsETHPrice;
 
             if (rsethAmountToMintAsProtocolFee > 0) {
                 address treasury = lrtConfig.getContract(LRTConstants.PROTOCOL_TREASURY);

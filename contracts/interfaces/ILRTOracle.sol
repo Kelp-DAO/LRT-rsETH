@@ -12,7 +12,7 @@ interface ILRTOracle {
     event RsETHPriceUpdate(uint256 newPrice, uint256 oldPrice);
     event PricePercentageLimitUpdate(uint256 newLimit);
     event FeeMinted(address treasury, uint256 rsethAmount);
-    event RsETHPriceDecrease(uint256 oldRsETHPrice, uint256 newCalculatedRsETHPrice);
+    event RsETHPriceDecrease(uint256 highestRsethPrice, uint256 newCalculatedRsETHPrice);
     event PeriodInTimestampUpdate(uint256 newPeriod);
 
     // methods
