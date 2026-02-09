@@ -1,5 +1,5 @@
 # LRT-ETH
-Kelp DAO (https://www.kelpdao.xyz/restake/) is liquid restaking protocol currently building on top of EigenLayer.
+Kelp DAO (https://kerneldao.com/kelp/restake) is liquid restaking protocol currently building on top of EigenLayer.
 It gives users access to multiple benefits like restaking rewards, staking rewards, DeFi and liquidity.
 
 ## Table of Content
@@ -187,7 +187,7 @@ $ forge script script/Deploy.s.sol --broadcast --fork-url http://localhost:8545
 ```
 
 For instructions on how to deploy to a testnet or mainnet, check out the
-[Solidity Scripting](https://book.getfoundry.sh/guides/scripting-with-solidity) tutorial.
+[Solidity Scripting](https://getfoundry.sh/forge/scripting) tutorial.
 
 
 ## Verify Contracts
@@ -244,7 +244,7 @@ $ npm test:coverage:report
 
 ## Using Static Analyzer for the contracts
 
-Lib used [Aderyn](https://docs.cyfrin.io/)
+Lib used [Aderyn](https://cyfrin.gitbook.io/cyfrin-docs)
 
 - Installation
 ```bash
@@ -261,7 +261,7 @@ Example:
 aderyn -s contracts/FeeReceiver.sol
 ```
 
-See List of options [here](https://docs.cyfrin.io/aderyn-static-analyzer/cli-options)
+See List of options [here](https://cyfrin.gitbook.io/cyfrin-docs/aderyn/cli-options)
 or run `aderyn --help`
 
 
