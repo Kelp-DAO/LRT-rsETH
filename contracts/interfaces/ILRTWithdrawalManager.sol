@@ -3,7 +3,6 @@ pragma solidity 0.8.27;
 
 interface ILRTWithdrawalManager {
     //errors
-    error TokenTransferFailed();
     error EthTransferFailed();
     error InvalidAmountToWithdraw();
     error ExceedAmountToWithdraw();
@@ -16,12 +15,25 @@ interface ILRTWithdrawalManager {
 
     error RsETHPriceOutOfPriceRange(uint256 rsEthPrice);
     error AssetPriceOutOfPriceRange(uint256 assetPrice);
+    error CantInstantWithdrawMoreThanAvailable();
+    error NotEnoughRsETH();
+    error InstantWithdrawalNotEnabled();
+    error FeeTooHigh();
+    error PendingWithdrawalsExist();
+    error TreasuryTransferFailed();
+    error NoWithdrawalRequests(address user, address asset);
+    error AaveIntegrationNotEnabled();
+    error InsufficientAaveBalance();
+    error InvalidAaveConfiguration();
+    error AaveHealthCheckFailed();
+    error InsufficientLiquidityForWithdrawal();
+    error UnauthorizedCaller();
+    error AaveIntegrationAlreadyInDesiredState(bool enabled);
 
     struct UnlockParams {
         uint256 rsETHPrice;
         uint256 assetPrice;
         uint256 totalAvailableAssets;
-        uint256 firstExcludedIndex;
     }
 
     struct WithdrawalRequest {
@@ -48,9 +60,24 @@ interface ILRTWithdrawalManager {
     event WithdrawalDelayBlocksUpdated(uint256 withdrawalDelayBlocks);
 
     event ReferralIdEmitted(string referralId);
+    event InstantWithdrawalEnabledUpdated(address indexed asset, bool enabled);
+    event InstantWithdrawalFeeUpdated(uint256 feeBasisPoints);
+    event InstantWithdrawalFeeRecipientUpdated(address indexed feeRecipient);
+    event InstantWithdrawalFeeCollected(address indexed user, address indexed asset, uint256 fee);
+    event TreasuryWithdrawalSettled(address indexed asset, uint256 amount);
+    event RemainingAssetsSwept(address indexed asset, uint256 amount, address indexed treasury);
+    event AssetWithdrawalCompletedBy(address indexed user);
+    event AaveIntegrationConfigured(
+        address indexed aavePool, address indexed aaveWETHGateway, address indexed aaveAWETH, address aaveDataProvider
+    );
+    event AaveIntegrationEnabled(bool enabled);
+    event ETHDepositedToAave(uint256 amount, uint256 totalDeposited);
+    event ETHWithdrawnFromAave(uint256 amount, uint256 totalDeposited);
+    event InterestCollectedToTreasury(uint256 interestAmount, address indexed treasury);
+    event EmergencyWithdrawFromAave(uint256 amount, address indexed recipient);
+    event AaveDepositFailed(uint256 amount, bytes reason);
 
     // methods
-
     function getExpectedAssetAmount(address asset, uint256 amount) external view returns (uint256);
 
     function getAvailableAssetAmount(address asset) external view returns (uint256 assetAmount);
@@ -68,6 +95,8 @@ interface ILRTWithdrawalManager {
 
     function completeWithdrawal(address asset, string calldata referralId) external;
 
+    function completeWithdrawalForUser(address asset, address user, string calldata referralId) external;
+
     function unlockQueue(
         address asset,
         uint256 index,
@@ -81,4 +110,40 @@ interface ILRTWithdrawalManager {
 
     // receive functions
     function receiveFromLRTUnstakingVault() external payable;
+
+    function setInstantWithdrawalEnabled(address asset, bool enabled) external;
+
+    function setInstantWithdrawalFee(uint256 feeBasisPoints) external;
+
+    function setInstantWithdrawalFeeRecipient(address feeRecipient) external;
+
+    function assetsCommitted(address asset) external view returns (uint256);
+
+    // Treasury withdrawal flow functions
+    function hasUnlockedWithdrawals(address asset) external view returns (bool);
+
+    function sweepRemainingAssets(address asset) external returns (uint256 transferredAmount);
+
+    // Aave integration functions
+    function configureAaveIntegration(
+        address aavePool_,
+        address aaveWETHGateway_,
+        address aaveAWETH_,
+        address aaveDataProvider_
+    )
+        external;
+
+    function setAaveIntegrationEnabled(bool enabled) external;
+
+    function depositIdleETHToAave(uint256 amount) external;
+
+    function collectInterestToTreasury() external returns (uint256 interestAmount);
+
+    function emergencyWithdrawFromAave(uint256 amount) external;
+
+    function getAaveBalance() external view returns (uint256);
+
+    function getAccruedInterest() external view returns (uint256);
+
+    function aaveHealthCheck() external view returns (bool);
 }

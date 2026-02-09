@@ -2,9 +2,12 @@
 pragma solidity 0.8.27;
 
 import {
-    ERC20Upgradeable, IERC20Upgradeable
+    ERC20Upgradeable,
+    IERC20Upgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -17,6 +20,8 @@ import {
     MessagingReceipt,
     TxReceipt
 } from "contracts/external/layerzero/interfaces/IStargatePoolNative.sol";
+import { IL2Messenger } from "contracts/interfaces/L2/IL2Messenger.sol";
+import { IL2TokenBridge } from "contracts/interfaces/L2/IL2TokenBridge.sol";
 
 interface IOracle {
     function getRate() external view returns (uint256);
@@ -35,7 +40,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     /// @custom:oz-renamed-from wstETH
     IERC20Upgradeable public legacyWstETH; // legacy variable
 
-    uint256 public feeBps; // Basis points for fees
+    uint256 public feeBps; // Basis points for fees for ETH deposits
     uint256 public feeEarnedInETH;
     /// @custom:oz-renamed-from feeEarnedInWstETH
     uint256 public legacyFeeEarnedInWstETH; // legacy variable
@@ -67,6 +72,21 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     /// @notice New variable added for pausable functionality
     bool public paused;
 
+    /// @notice The mapping of token addresses to their respective token bridges
+    mapping(address token => address bridge) public tokenBridge;
+
+    /// @notice The address of the L2 bridge contract on Arbitrum
+    address public l2Bridge;
+
+    /// @notice The address of the Arbitrum messenger contract
+    address public messenger;
+
+    /// @notice The pauser role identifier
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
+    /// @dev Mapping of token to fee basis points
+    mapping(address token => uint256 feeBps) public tokenFeeBps;
+
     modifier whenNotPaused() {
         if (paused) revert ContractPaused();
         _;
@@ -88,40 +108,85 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     error UnsupportedToken();
     error AlreadySupportedToken();
     error TokenNotFoundError();
+    error TokenBalanceNotZero();
     error EthDepositDisabled();
     error InsufficientETHBalance();
     error InvalidMinAmount();
-    error InsufficientNativeFee();
+    error IncorrectNativeFee();
     error InvalidSlippageTolerance();
     error ContractPaused();
     error ContractNotPaused();
-    error DeprecatedFunction();
     error InvalidLzChainId();
+    error ZeroBridgeAmount();
+    error MissingBridgeForToken();
+    error InvalidFeeAmount();
+    error InsufficientBalanceInPool();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
     event FeesWithdrawn(uint256 feeEarnedInETH, address token);
-    event AssetsMovedForBridging(uint256 tokenBalanceMinusFees, address token);
-    event BridgedETHToL1(uint32 lzChainId, address l1Receiver, uint256 amountSent, uint256 amountReceived);
+    event BridgedETHToL1ViaNativeBridge(address indexed l1Receiver, uint256 ethBalanceMinusFees);
+    event BridgedETHToL1(
+        uint32 indexed lzChainId, address indexed l1Receiver, uint256 amountSent, uint256 amountReceived
+    );
+    event BridgedTokenToL1(address indexed token, address indexed l1Receiver, uint256 amountSent);
     event FeeBpsSet(uint256 feeBps);
+    event TokenFeeBpsSet(address indexed token, uint256 feeBps);
     event OracleSet(address oracle);
-    event AddSupportedToken(address token);
+    event AddSupportedToken(address token, address oracle, address bridge);
     event RemovedSupportedToken(address token);
     event IsEthDepositEnabled(bool isEthDepositEnabled);
     event L1VaultETHForL2ChainSet(address l1VaultETHForL2Chain);
     event StargatePoolSet(address stargatePool);
     event LzChainIdSet(uint32 lzChainId);
+    event L2BridgeSet(address l2Bridge);
+    event MessengerSet(address messenger);
+    event TokenOracleSet(address indexed token, address oracle);
+    event TokenBridgeSet(address indexed token, address bridge);
     event Paused(address account);
     event Unpaused(address account);
+    event AssetsMovedForBridging(uint256 ethBalanceMinusFees);
+    event AssetsMovedForBridging(uint256 tokenBalanceMinusFees, address token);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
+    /**
+     * @notice Reinitializes the contract to enable native bridging of ETH and wstETH from Arbitrum to ETH mainnet
+     * @param _l2Bridge The address of the L2 bridge contract on Arbitrum
+     * @param _messenger The address of the Arbitrum messenger contract
+     * @param _token The address of the supported token to set the bridge address for (e.g., wstETH)
+     * @param _tokenBridge The address of the token bridge contract
+     */
+    function reinitialize(
+        address _l2Bridge,
+        address _messenger,
+        address _token,
+        address _tokenBridge
+    )
+        external
+        reinitializer(4)
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlySupportedToken(_token)
+    {
+        UtilLib.checkNonZeroAddress(_l2Bridge);
+        UtilLib.checkNonZeroAddress(_messenger);
+        UtilLib.checkNonZeroAddress(_tokenBridge);
+
+        l2Bridge = _l2Bridge;
+        messenger = _messenger;
+        tokenBridge[_token] = _tokenBridge;
+
+        emit L2BridgeSet(_l2Bridge);
+        emit MessengerSet(_messenger);
+        emit TokenBridgeSet(_token, _tokenBridge);
+    }
+
     /// @dev Reinitialize the contract
     /// @param _dstLzChainId The LayerZero ID for the ETH mainnet
-    function reinitialize(uint32 _dstLzChainId) public reinitializer(3) onlyRole(DEFAULT_ADMIN_ROLE) {
+    function reinitialize(uint32 _dstLzChainId) external reinitializer(3) onlyRole(DEFAULT_ADMIN_ROLE) {
         dstLzChainId = _dstLzChainId;
     }
 
@@ -134,7 +199,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         address _stargatePool,
         uint32 _dstLzChainId
     )
-        public
+        external
         reinitializer(2)
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
@@ -163,7 +228,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         address _rsETHOracle,
         address _wstETH_ETHOracle
     )
-        public
+        external
         initializer
     {
         UtilLib.checkNonZeroAddress(_rsETH);
@@ -197,7 +262,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
 
     /// @dev Swaps ETH for rsETH
     /// @param referralId The referral id
-    function deposit(string memory referralId) external payable whenNotPaused nonReentrant {
+    function deposit(string memory referralId) external payable nonReentrant whenNotPaused {
         if (!isEthDepositEnabled) revert EthDepositDisabled();
         uint256 amount = msg.value;
 
@@ -207,7 +272,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
 
         feeEarnedInETH += fee;
 
-        wrsETH.transfer(msg.sender, rsETHAmount);
+        IERC20(address(wrsETH)).safeTransfer(msg.sender, rsETHAmount);
 
         emit SwapOccurred(msg.sender, rsETHAmount, fee, referralId);
     }
@@ -222,8 +287,8 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         string memory referralId
     )
         external
-        whenNotPaused
         nonReentrant
+        whenNotPaused
         onlySupportedToken(token)
     {
         if (amount == 0) revert InvalidAmount();
@@ -234,7 +299,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
 
         feeEarnedInToken[token] += fee;
 
-        wrsETH.transfer(msg.sender, rsETHAmount);
+        IERC20(address(wrsETH)).safeTransfer(msg.sender, rsETHAmount);
 
         emit SwapOccurred(msg.sender, rsETHAmount, fee, referralId); // Add token address?
     }
@@ -267,7 +332,8 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         onlySupportedToken(token)
         returns (uint256 rsETHAmount, uint256 fee)
     {
-        fee = amount * feeBps / 10_000;
+        uint256 feeBpsForToken = tokenFeeBps[token];
+        fee = amount * feeBpsForToken / 10_000;
         uint256 amountAfterFee = amount - fee;
 
         // rate of rsETH in ETH
@@ -281,9 +347,9 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     }
 
     /**
-     * @dev Quote the native fee for sending RsETH to L2
-     * @param amount The amount of RsETH to send
-     * @param minAmount The minimum amount of RsETH to receive on L2
+     * @dev Quote the native fee for sending ETH to L1
+     * @param amount The amount of ETH to send
+     * @param minAmount The minimum amount of ETH to receive on L1 after slippage
      * @return The fee to be paid in native currency
      */
     function getNativeFee(uint256 amount, uint256 minAmount) external view returns (uint256) {
@@ -323,13 +389,22 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     }
 
     /**
+     * @dev Get the token balance minus the fees
+     * @param token The token address
+     * @return The token balance minus the fees
+     */
+    function getTokenBalanceMinusFees(address token) public view returns (uint256) {
+        return IERC20(token).balanceOf(address(this)) - feeEarnedInToken[token];
+    }
+
+    /**
      * @dev Get the minimum amount after slippage
      * @param amount The amount
      * @param slippageTolerance The slippage tolerance
      * @return The minimum amount after slippage
      */
-    function getMinAmount(uint256 amount, uint256 slippageTolerance) public pure returns (uint256) {
-        if (slippageTolerance > 100) revert InvalidSlippageTolerance();
+    function getMinAmount(uint256 amount, uint256 slippageTolerance) external pure returns (uint256) {
+        if (slippageTolerance > 10_000) revert InvalidSlippageTolerance();
 
         return amount - (amount * slippageTolerance / 10_000);
     }
@@ -339,7 +414,7 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Withdraws fees earned by the pool
-    function withdrawFees(address receiver) external onlyRole(BRIDGER_ROLE) {
+    function withdrawFees(address receiver) external nonReentrant onlyRole(BRIDGER_ROLE) {
         // withdraw fees in ETH
         uint256 amountToSendInETH = feeEarnedInETH;
         feeEarnedInETH = 0;
@@ -350,7 +425,15 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     }
 
     /// @dev Withdraws fees earned by the pool
-    function withdrawFees(address receiver, address token) external onlySupportedToken(token) onlyRole(BRIDGER_ROLE) {
+    function withdrawFees(
+        address receiver,
+        address token
+    )
+        external
+        nonReentrant
+        onlySupportedToken(token)
+        onlyRole(BRIDGER_ROLE)
+    {
         // withdraw fees in ETH
         uint256 amountToSendInToken = feeEarnedInToken[token];
         feeEarnedInToken[token] = 0;
@@ -360,18 +443,54 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
     }
 
     /// @dev Withdraws assets from the contract for bridging
-    function moveAssetsForBridging() external view onlyRole(BRIDGER_ROLE) {
-        revert DeprecatedFunction();
+    function moveAssetsForBridging(uint256 amount) external nonReentrant onlyRole(BRIDGER_ROLE) {
+        if (amount == 0) revert InvalidAmount();
+
+        // withdraw up to ETH - fees
+        uint256 ethBalanceMinusFees = getETHBalanceMinusFees();
+        if (amount > ethBalanceMinusFees) revert InsufficientBalanceInPool();
+
+        (bool success,) = msg.sender.call{ value: amount }("");
+        if (!success) revert TransferFailed();
+
+        emit AssetsMovedForBridging(amount);
     }
 
-    /// @dev Legacy function - Withdraws assets from the contract for bridging
-    function moveAssetsForBridging(address token) external onlySupportedToken(token) onlyRole(BRIDGER_ROLE) {
-        // withdraw token - fees
-        uint256 tokenBalanceMinusFees = IERC20(token).balanceOf(address(this)) - feeEarnedInToken[token];
+    /// @dev Withdraws assets from the contract for bridging
+    function moveAssetsForBridging(
+        address token,
+        uint256 amount
+    )
+        external
+        nonReentrant
+        onlySupportedToken(token)
+        onlyRole(BRIDGER_ROLE)
+    {
+        if (amount == 0) revert InvalidAmount();
 
-        IERC20(token).safeTransfer(msg.sender, tokenBalanceMinusFees);
+        // withdraw up to token - fees
+        uint256 tokenBalanceMinusFees = getTokenBalanceMinusFees(token);
+        if (amount > tokenBalanceMinusFees) revert InsufficientBalanceInPool();
 
-        emit AssetsMovedForBridging(tokenBalanceMinusFees, token);
+        IERC20(token).safeTransfer(msg.sender, amount);
+
+        emit AssetsMovedForBridging(amount, token);
+    }
+
+    /// @notice Withdraws ETH from Arbitrum to L1 using the Arbitrum's native bridge
+    function bridgeAssetsViaNativeBridge() external nonReentrant onlyRole(BRIDGER_ROLE) {
+        UtilLib.checkNonZeroAddress(l2Bridge);
+        UtilLib.checkNonZeroAddress(messenger);
+        UtilLib.checkNonZeroAddress(l1VaultETHForL2Chain);
+
+        // withdraw ETH - fees
+        uint256 ethBalanceMinusFees = getETHBalanceMinusFees();
+
+        IL2Messenger(messenger).sendETHToL1ViaBridge{ value: ethBalanceMinusFees }(
+            l2Bridge, l1VaultETHForL2Chain, ethBalanceMinusFees
+        );
+
+        emit BridgedETHToL1ViaNativeBridge(l1VaultETHForL2Chain, ethBalanceMinusFees);
     }
 
     /// @dev Withdraws assets from the L2 to L1 using LayerZero
@@ -388,7 +507,8 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         nonReentrant
         onlyRole(BRIDGER_ROLE)
     {
-        if (getETHBalanceMinusFees() < amount) {
+        // Exclude msg.value so reserved fees can’t be accidentally consumed
+        if (getETHBalanceMinusFees() - msg.value < amount) {
             revert InsufficientETHBalance();
         }
 
@@ -396,8 +516,8 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
             revert InvalidMinAmount();
         }
 
-        if (msg.value < nativeFee) {
-            revert InsufficientNativeFee();
+        if (msg.value != nativeFee) {
+            revert IncorrectNativeFee();
         }
 
         SendParam memory sendParam = SendParam({
@@ -420,14 +540,57 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         emit BridgedETHToL1(dstLzChainId, l1VaultETHForL2Chain, oftReceipt.amountSentLD, oftReceipt.amountReceivedLD);
     }
 
+    /// @dev Bridges tokens to L1 using their corresponding token bridge
+    /// @param token The address of the token to bridge
+    function bridgeTokens(address token)
+        external
+        payable
+        nonReentrant
+        onlySupportedToken(token)
+        onlyRole(BRIDGER_ROLE)
+    {
+        if (tokenBridge[token] == address(0)) {
+            revert MissingBridgeForToken();
+        }
+
+        uint256 balance = getTokenBalanceMinusFees(token);
+
+        if (balance == 0) {
+            revert ZeroBridgeAmount();
+        }
+
+        // Approve the required amount to the bridge
+        IERC20(token).safeIncreaseAllowance(tokenBridge[token], balance);
+
+        // Call the bridge contract to transfer the tokens (msg.value is included in case we need to pay for additional
+        // bridging fees)
+        IL2TokenBridge(tokenBridge[token]).bridgeTokenToL1{ value: msg.value }(l1VaultETHForL2Chain, balance);
+
+        emit BridgedTokenToL1(token, l1VaultETHForL2Chain, balance);
+    }
+
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
-    function setFeeBps(uint256 _feeBps) external onlyRole(TIMELOCK_ROLE) {
-        if (_feeBps > 10_000) revert InvalidAmount();
-
+    function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_feeBps > 10_000) revert InvalidFeeAmount();
         feeBps = _feeBps;
-
         emit FeeBpsSet(_feeBps);
+    }
+
+    /// @dev Sets the fee basis points for a specific token
+    /// @param token The token address
+    /// @param _feeBps The fee basis points
+    function setTokenFeeBps(
+        address token,
+        uint256 _feeBps
+    )
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlySupportedToken(token)
+    {
+        if (_feeBps > 10_000) revert InvalidFeeAmount();
+        tokenFeeBps[token] = _feeBps;
+        emit TokenFeeBpsSet(token, _feeBps);
     }
 
     /// @dev Sets the isEthDepositEnabled flag
@@ -469,11 +632,17 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
 
     /// @dev Adds a supported token
     /// @param token The token address
-    function addSupportedToken(address token, address oracle) external onlyRole(TIMELOCK_ROLE) {
+    /// @param oracle The oracle address for the token
+    /// @param bridge The bridge address for the token
+    function addSupportedToken(address token, address oracle, address bridge) external onlyRole(TIMELOCK_ROLE) {
         UtilLib.checkNonZeroAddress(token);
         UtilLib.checkNonZeroAddress(oracle);
+        UtilLib.checkNonZeroAddress(bridge);
 
         if (supportedTokenOracle[token] != address(0)) {
+            revert AlreadySupportedToken();
+        }
+        if (tokenBridge[token] != address(0)) {
             revert AlreadySupportedToken();
         }
         if (IOracle(oracle).getRate() == 0) {
@@ -481,18 +650,20 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         }
         supportedTokenList.push(token);
         supportedTokenOracle[token] = oracle;
+        tokenBridge[token] = bridge;
 
-        emit AddSupportedToken(token);
+        emit AddSupportedToken(token, oracle, bridge);
     }
 
     /// @dev Removes a supported token
     /// @param token The token address
     function removeSupportedToken(address token, uint256 tokenIndex) external onlyRole(TIMELOCK_ROLE) {
         UtilLib.checkNonZeroAddress(token);
-        if (supportedTokenList[tokenIndex] != token) {
-            revert TokenNotFoundError();
-        }
+        if (supportedTokenList[tokenIndex] != token) revert TokenNotFoundError();
+        if (IERC20(token).balanceOf(address(this)) != 0) revert TokenBalanceNotZero();
+
         delete supportedTokenOracle[token];
+        delete tokenBridge[token];
         supportedTokenList[tokenIndex] = supportedTokenList[supportedTokenList.length - 1];
         supportedTokenList.pop();
         emit RemovedSupportedToken(token);
@@ -510,14 +681,66 @@ contract RSETHPool is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGuar
         emit LzChainIdSet(_dstLzChainId);
     }
 
+    /**
+     * @notice Sets the new l2Bridge address
+     * @param _l2Bridge The new l2Bridge address
+     */
+    function setL2Bridge(address _l2Bridge) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_l2Bridge);
+        l2Bridge = _l2Bridge;
+        emit L2BridgeSet(_l2Bridge);
+    }
+
+    /**
+     * @notice Sets the L2 messenger address
+     * @param _messenger The new L2 messenger address
+     */
+    function setMessenger(address _messenger) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_messenger);
+        messenger = _messenger;
+        emit MessengerSet(_messenger);
+    }
+
+    /**
+     * @notice Sets the oracle for a specific token
+     * @param token The token address
+     * @param oracle The new oracle address for the token
+     */
+    function setSupportedTokenOracle(
+        address token,
+        address oracle
+    )
+        external
+        onlyRole(TIMELOCK_ROLE)
+        onlySupportedToken(token)
+    {
+        UtilLib.checkNonZeroAddress(oracle);
+        if (IOracle(oracle).getRate() == 0) {
+            revert UnsupportedOracle();
+        }
+        supportedTokenOracle[token] = oracle;
+        emit TokenOracleSet(token, oracle);
+    }
+
+    /**
+     * @notice Sets the token bridge address for a specific token
+     * @param token The token address
+     * @param bridge The new bridge address for the token
+     */
+    function setTokenBridge(address token, address bridge) external onlyRole(TIMELOCK_ROLE) onlySupportedToken(token) {
+        UtilLib.checkNonZeroAddress(bridge);
+        tokenBridge[token] = bridge;
+        emit TokenBridgeSet(token, bridge);
+    }
+
     /// @dev Pauses the pausable methods in the contract
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) whenNotPaused {
         paused = true;
         emit Paused(msg.sender);
     }
 
     /// @dev Unpauses the pausable methods in the contract
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) whenPaused {
         paused = false;
         emit Unpaused(msg.sender);
     }

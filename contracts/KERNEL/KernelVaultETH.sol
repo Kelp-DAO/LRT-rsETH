@@ -5,7 +5,9 @@ import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/ac
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { IKERNEL_OFTAdapter, MessagingFee, SendParam } from "contracts/interfaces/IKERNEL_OFTAdapter.sol";
@@ -181,14 +183,14 @@ contract KernelVaultETH is Initializable, AccessControlUpgradeable, PausableUpgr
         // Approve the Kernel OFT adapter to spend an unlimited amount of KERNEL tokens on behalf of this contract
         // for bridging purposes in order to avoid the need to approve the contract every time a bridging transaction
         // is initiated
-        kernel.safeApprove(address(kernelOftAdapter), type(uint256).max);
+        kernel.forceApprove(address(kernelOftAdapter), type(uint256).max);
     }
 
     /**
      * @notice Deposits KERNEL tokens into the vault
      * @param amount The amount of KERNEL tokens to deposit
      */
-    function depositKernel(uint256 amount) external whenNotPaused nonReentrant {
+    function depositKernel(uint256 amount) external nonReentrant whenNotPaused {
         _depositKernel(msg.sender, amount);
     }
 
@@ -202,8 +204,8 @@ contract KernelVaultETH is Initializable, AccessControlUpgradeable, PausableUpgr
         uint256 amount
     )
         external
-        whenNotPaused
         nonReentrant
+        whenNotPaused
         onlyRole(MERKLE_DISTRIBUTOR_ROLE)
     {
         _depositKernel(user, amount);

@@ -4,20 +4,21 @@ pragma solidity 0.8.27;
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
 import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.sol";
-import { INodeDelegator, IDelegationManagerTypes } from "./interfaces/INodeDelegator.sol";
-import { IEigenPodManager } from "./external/eigenlayer/interfaces/IEigenPodManager.sol";
+import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
 import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
 import { ILRTWithdrawalManager } from "./interfaces/ILRTWithdrawalManager.sol";
-import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
 import { IStrategyManager } from "./external/eigenlayer/interfaces/IStrategyManager.sol";
+import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
+import { IDelegationManager } from "./external/eigenlayer/interfaces/IDelegationManager.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { SlashingLib } from "./external/eigenlayer/libraries/SlashingLib.sol";
-import { IDelegationManager } from "contracts/external/eigenlayer/interfaces/IDelegationManager.sol";
 
 /// @title LRTUnstakingVault Contract
 /// @notice The contract that handles the unstaking of assets
@@ -31,17 +32,18 @@ contract LRTUnstakingVault is
     using SlashingLib for *;
     using LRTConstants for ILRTConfig;
 
-    // NOTE: For legacy withdrawal support, this can be made private after all pre slashing withdrawals are processed
-    // (asset => 0)
-    mapping(address asset => uint256) public sharesUnstaking;
+    mapping(address asset => uint256) private __deprecated_sharesUnstaking;
 
     mapping(bytes32 => bool) public trackedWithdrawal;
 
     uint256 public uncompletedWithdrawalCount;
     uint256 public maxUncompletedWithdrawalCount;
 
+    // Portion of the vault reserved for servicing queued withdrawals; unavailable for instant withdrawals.
+    mapping(address asset => uint256 buffer) public queuedWithdrawalsBuffer;
+
     modifier onlyLRTNodeDelegator() {
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
+        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
 
         if (lrtDepositPool.isNodeDelegator(msg.sender) != 1) {
             revert CallerNotLRTNodeDelegator();
@@ -103,7 +105,7 @@ contract LRTUnstakingVault is
     }
 
     /// @notice transfers asset lying in this LRTUnstakingVault to node delegator contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param asset Asset address
     /// @param amount Asset amount to transfer
@@ -114,7 +116,7 @@ contract LRTUnstakingVault is
     )
         external
         nonReentrant
-        onlyLRTOperator
+        onlyAssetTransferRole
         onlySupportedAsset(asset)
     {
         ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
@@ -124,23 +126,23 @@ contract LRTUnstakingVault is
     }
 
     /// @notice transfers ETH lying in this LRTUnstakingVault to node delegator contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param amount ETH amount to transfer
-    function transferETHToNodeDelegator(uint256 ndcIndex, uint256 amount) external nonReentrant onlyLRTOperator {
+    function transferETHToNodeDelegator(
+        uint256 ndcIndex,
+        uint256 amount
+    )
+        external
+        nonReentrant
+        onlyAssetTransferRole
+        onlySupportedAsset(LRTConstants.ETH_TOKEN)
+    {
         ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.depositPool());
         address[] memory nodeDelegatorQueue = lrtDepositPool.getNodeDelegatorQueue();
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
         INodeDelegator(nodeDelegator).sendETHFromUnstakingVaultToNDC{ value: amount }();
         emit EthTransferred(nodeDelegator, amount);
-    }
-
-    /// @notice Reduce shares that are in unstaking process.
-    /// @param asset The asset address.
-    /// @param amount The amount of shares to reduce.
-    /// @dev This function is only callable by the NodeDelegator contracts during the unstaking process.
-    function reduceSharesUnstaking(address asset, uint256 amount) external onlyLRTNodeDelegator {
-        sharesUnstaking[asset] -= amount;
     }
 
     /// @notice Set the max number of uncompleted withdrawals.
@@ -152,6 +154,29 @@ contract LRTUnstakingVault is
             revert MaxUncompletedWithdrawalCountTooHigh();
         }
         maxUncompletedWithdrawalCount = _maxUncompletedWithdrawalCount;
+
+        emit MaxUncompletedWithdrawalCountSet(_maxUncompletedWithdrawalCount);
+    }
+
+    /// @notice Set the uncompleted withdrawal count.
+    /// @notice Can be used on forced undelegations.
+    /// @dev only callable by LRT Manager
+    function setUncompletedWithdrawalCount() external onlyLRTManager {
+        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
+        IDelegationManager delegationManager =
+            IDelegationManager(lrtConfig.getContract(LRTConstants.EIGEN_DELEGATION_MANAGER));
+        address[] memory nodeDelegatorQueue = lrtDepositPool.getNodeDelegatorQueue();
+        uint256 totalQueued;
+        for (uint256 i = 0; i < nodeDelegatorQueue.length; i++) {
+            address nodeDelegator = nodeDelegatorQueue[i];
+            (IDelegationManager.Withdrawal[] memory queuedWithdrawals,) =
+                delegationManager.getQueuedWithdrawals(nodeDelegator);
+            totalQueued += queuedWithdrawals.length;
+        }
+
+        uncompletedWithdrawalCount = totalQueued;
+
+        emit UncompletedWithdrawalCountSet(totalQueued);
     }
 
     /// @notice Increase the number of uncompleted withdrawals.
@@ -168,32 +193,48 @@ contract LRTUnstakingVault is
         }
     }
 
+    /// @notice Set the reserved buffer for queued withdrawals for an asset.
+    /// @param asset The asset address.
+    /// @param buffer The reserved amount for queued withdrawals.
+    function setQueuedWithdrawalsBuffer(
+        address asset,
+        uint256 buffer
+    )
+        external
+        onlyLRTOperator
+        onlySupportedAsset(asset)
+    {
+        queuedWithdrawalsBuffer[asset] = buffer;
+        emit QueuedWithdrawalsBufferUpdated(asset, buffer);
+    }
+
     /*//////////////////////////////////////////////////////////////
                             view functions
     //////////////////////////////////////////////////////////////*/
 
-    // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
-    /// @notice Returns the total asset amount in unstaking process.
-    /// @param asset The asset address.
-    /// @return The total asset amount in unstaking process.
-    function getAssetsUnstaking(address asset) external view onlySupportedAsset(asset) returns (uint256) {
-        if (asset == LRTConstants.ETH_TOKEN) {
-            return sharesUnstaking[asset];
-        }
-
-        IStrategy strategy = IStrategy(lrtConfig.assetStrategy(asset));
-        return strategy.sharesToUnderlyingView(sharesUnstaking[asset]);
-    }
-
     /// @notice Returns the the vaults balance of the asset.
     /// @param asset The asset address.
     /// @return The balance of the asset.
-    function balanceOf(address asset) external view returns (uint256) {
+    function balanceOf(address asset) public view returns (uint256) {
         if (asset == LRTConstants.ETH_TOKEN) {
             return address(this).balance;
         } else {
             return IERC20(asset).balanceOf(address(this));
         }
+    }
+
+    /// @notice Returns the amount of the asset available for instant withdrawal.
+    /// @param asset The asset address.
+    /// @return availableAmount The amount of the asset available for instant withdrawal.
+    function getAssetsAvailableForInstantWithdrawal(address asset)
+        external
+        view
+        onlySupportedAsset(asset)
+        returns (uint256 availableAmount)
+    {
+        uint256 vaultBalance = balanceOf(asset);
+        uint256 reservedBuffer = queuedWithdrawalsBuffer[asset];
+        availableAmount = reservedBuffer >= vaultBalance ? 0 : vaultBalance - reservedBuffer;
     }
 
     /// @notice Fetches balance of all assets staked in eigen layer through this contract

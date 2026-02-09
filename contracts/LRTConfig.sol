@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 import { UtilLib } from "./utils/UtilLib.sol";
 import { LRTConstants } from "./utils/LRTConstants.sol";
@@ -8,6 +8,11 @@ import { IStrategy } from "./external/eigenlayer/interfaces/IStrategy.sol";
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+
+interface IPausable {
+    function pause() external;
+    function paused() external view returns (bool);
+}
 
 /// @title LRTConfig - LRT Config Contract
 /// @notice Handles LRT configuration
@@ -251,5 +256,31 @@ contract LRTConfig is ILRTConfig, AccessControlUpgradeable {
     function setMaxNegligibleAmount(uint256 maxNegligibleAmount_) external onlyRole(DEFAULT_ADMIN_ROLE) {
         maxNegligibleAmount = maxNegligibleAmount_;
         emit MaxNegligibleAmountUpdated(maxNegligibleAmount_);
+    }
+
+    /// @dev Pauses all pausable contracts within the protocol (no-op for already paused contracts).
+    function pauseAll() external onlyRole(LRTConstants.PAUSER_ROLE) {
+        IPausable lrtDepositPool = IPausable(getContract(LRTConstants.LRT_DEPOSIT_POOL));
+        IPausable lrtWithdrawalManager = IPausable(getContract(LRTConstants.LRT_WITHDRAW_MANAGER));
+        IPausable lrtOracle = IPausable(getContract(LRTConstants.LRT_ORACLE));
+        IPausable rsETHContract = IPausable(rsETH);
+
+        if (!lrtDepositPool.paused()) lrtDepositPool.pause();
+        if (!lrtWithdrawalManager.paused()) lrtWithdrawalManager.pause();
+        if (!lrtOracle.paused()) lrtOracle.pause();
+        if (!rsETHContract.paused()) rsETHContract.pause();
+
+        address[] memory nodeDelegatorQueue = ILRTDepositPool(address(lrtDepositPool)).getNodeDelegatorQueue();
+        uint256 nodeDelegatorCount = nodeDelegatorQueue.length;
+
+        for (uint256 i = 0; i < nodeDelegatorCount;) {
+            IPausable nodeDelegator = IPausable(nodeDelegatorQueue[i]);
+            if (!nodeDelegator.paused()) nodeDelegator.pause();
+            unchecked {
+                ++i;
+            }
+        }
+
+        emit PausedAll(msg.sender);
     }
 }

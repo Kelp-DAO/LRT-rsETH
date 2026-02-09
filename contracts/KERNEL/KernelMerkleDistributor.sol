@@ -3,11 +3,14 @@ pragma solidity 0.8.27;
 
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { MerkleProofUpgradeable } from
-    "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
+import {
+    MerkleProofUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { UtilLib } from "contracts/utils/UtilLib.sol";
@@ -220,7 +223,7 @@ contract KernelMerkleDistributor is
 
         // Approve the KernelDepositPool contract to spend an unlimited amount of KERNEL tokens on behalf of this
         // contract
-        kernel.safeApprove(_kernelDepositPool, type(uint256).max);
+        kernel.forceApprove(_kernelDepositPool, type(uint256).max);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -252,8 +255,8 @@ contract KernelMerkleDistributor is
     )
         external
         override
-        whenNotPaused
         nonReentrant
+        whenNotPaused
     {
         uint256 amountToSend = _processClaim(index, account, cumulativeAmount, merkleProof);
 
@@ -271,8 +274,8 @@ contract KernelMerkleDistributor is
         bytes32[] calldata merkleProof
     )
         external
-        whenNotPaused
         nonReentrant
+        whenNotPaused
     {
         uint256 amountToStake = _processClaim(index, account, cumulativeAmount, merkleProof);
 
@@ -357,11 +360,11 @@ contract KernelMerkleDistributor is
         kernelDepositPool = IKernelDepositPool(_kernelDepositPool);
 
         // Revoke the approval of the old KernelDepositPool contract to spend KERNEL tokens on behalf of this contract
-        kernel.safeApprove(oldKernelDepositPool, 0);
+        kernel.forceApprove(oldKernelDepositPool, 0);
 
         // Approve the KernelDepositPool contract to spend an unlimited amount of KERNEL tokens on behalf of this
         // contract
-        kernel.safeApprove(_kernelDepositPool, type(uint256).max);
+        kernel.forceApprove(_kernelDepositPool, type(uint256).max);
 
         emit KernelDepositPoolUpdated(_kernelDepositPool);
     }

@@ -467,13 +467,7 @@ interface IDelegationManager is ISignatureUtils, IDelegationManagerErrors, IDele
      * @param operator the operator to get shares for
      * @param strategies the strategies to get shares for
      */
-    function getOperatorShares(
-        address operator,
-        IStrategy[] memory strategies
-    )
-        external
-        view
-        returns (uint256[] memory);
+    function getOperatorShares(address operator, IStrategy[] memory strategies) external view returns (uint256[] memory);
 
     /**
      * @notice Returns the shares that a set of operators have delegated to them in a set of strategies

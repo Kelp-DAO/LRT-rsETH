@@ -4,7 +4,9 @@ pragma solidity 0.8.27;
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { UtilLib } from "contracts/utils/UtilLib.sol";
@@ -318,7 +320,7 @@ contract KernelDepositPool is Initializable, AccessControlUpgradeable, Reentranc
     function initiateWithdrawal(uint256 _amount) external nonReentrant updateReward(msg.sender) {
         if (_amount == 0) revert AmountZero();
         if (balanceOf[msg.sender] < _amount) revert InsufficientStakedBalance();
-        if (userWithdrawalIds[msg.sender].length > maxNumberOfWithdrawalsPerUser) revert WithdrawalLimitReached();
+        if (userWithdrawalIds[msg.sender].length >= maxNumberOfWithdrawalsPerUser) revert WithdrawalLimitReached();
 
         balanceOf[msg.sender] -= _amount;
         totalKernelStaked -= _amount;
@@ -328,11 +330,7 @@ contract KernelDepositPool is Initializable, AccessControlUpgradeable, Reentranc
         uint256 unlockTime = block.timestamp + withdrawalDelay;
 
         withdrawals[withdrawalId] = Withdrawal({
-            user: msg.sender,
-            amount: _amount,
-            unlockTime: unlockTime,
-            claimed: false,
-            withdrawalId: withdrawalId
+            user: msg.sender, amount: _amount, unlockTime: unlockTime, claimed: false, withdrawalId: withdrawalId
         });
         userWithdrawalIds[msg.sender].push(withdrawalId);
 
@@ -411,8 +409,8 @@ contract KernelDepositPool is Initializable, AccessControlUpgradeable, Reentranc
         if (totalKernelStaked == 0) {
             return rewardPerTokenStored;
         }
-        return rewardPerTokenStored
-            + (rewardRate * (lastTimeRewardApplicable() - updatedAt) * DECIMAL_PRECISION) / totalKernelStaked;
+        return rewardPerTokenStored + (rewardRate * (lastTimeRewardApplicable() - updatedAt) * DECIMAL_PRECISION)
+            / totalKernelStaked;
     }
 
     /**

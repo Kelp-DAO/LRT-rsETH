@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
-import { CrossChainRateReceiver } from "./CrossChainRateReceiver.sol";
+import { CrossChainRateReceiver } from "contracts/cross-chain/CrossChainRateReceiver.sol";
 
 /// @title rsETH cross chain rate receiver
 /// @notice Receives the rsETH rate from a provider contract on a different chain than the one this contract is deployed

@@ -8,8 +8,8 @@ import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { IFeeReceiver } from "./interfaces/IFeeReceiver.sol";
 
 /// @title FeeReceiver
-/// @notice Recieves Mev/Execution-layer rewards
-/// @dev also known as RewardReciever Contract in LRTConstants.sol
+/// @notice Receives Mev/Execution-layer rewards
+/// @dev also known as RewardReceiver Contract in LRTConstants.sol
 contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
     address public _legacyProtocolTreasury;
     address public depositPool;
@@ -27,7 +27,7 @@ contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
         address admin,
         address manager
     )
-        public
+        external
         initializer
     {
         if (
@@ -67,5 +67,7 @@ contract FeeReceiver is IFeeReceiver, Initializable, AccessControlUpgradeable {
         if (_depositPool == address(0)) revert InvalidEmptyValue();
 
         depositPool = _depositPool;
+
+        emit DepositPoolSet(_depositPool);
     }
 }

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
-import { CrossChainRateProvider } from "./CrossChainRateProvider.sol";
-
-import { ILRTOracle } from "../interfaces/ILRTOracle.sol";
+import { CrossChainRateProvider } from "contracts/cross-chain/CrossChainRateProvider.sol";
+import { ILRTOracle } from "contracts/interfaces/ILRTOracle.sol";
 
 /// @title rsETH cross chain rate provider
 /// @notice Provides the current exchange rate of rsETH to a receiver contract on a different chain than the one this
 /// contract is deployed on
 contract RSETHRateProvider is CrossChainRateProvider {
-    address public rsETHPriceOracle;
+    address public immutable rsETHPriceOracle;
 
     constructor(address _rsETHPriceOracle, uint16 _dstChainId, address _layerZeroEndpoint) {
         rsETHPriceOracle = _rsETHPriceOracle;
@@ -19,7 +18,7 @@ contract RSETHRateProvider is CrossChainRateProvider {
             tokenAddress: 0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7, // rsETH token address on ETH mainnet
             baseTokenSymbol: "ETH",
             baseTokenAddress: address(0) // Address 0 for native tokens
-         });
+        });
         dstChainId = _dstChainId;
         layerZeroEndpoint = _layerZeroEndpoint;
     }

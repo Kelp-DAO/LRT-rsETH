@@ -8,10 +8,36 @@ coverage
 coverage.json
 typechain
 typechain-types
+tmp
+.DS_Store
+flattened
+flattened_contracts
+venv
+
+# Test files
+mythril_reports
+sumo
 
 # Hardhat files
 cache
 artifacts
 
-# foundry files
+# Foundry files
 broadcast
+
+# Private files
+private
+test/private
+
+# zkSync files
+/zkout
+
+# misc
+storage_layout.txt
+storage_layout2.txt
+
+storage-report/diffs/*
+storage-report/layouts/*
+
+# script output
+script/out

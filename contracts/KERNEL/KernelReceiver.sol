@@ -5,7 +5,9 @@ import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/ac
 import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { UtilLib } from "contracts/utils/UtilLib.sol";
@@ -114,7 +116,7 @@ contract KernelReceiver is Initializable, AccessControlUpgradeable, PausableUpgr
         // Approve the StakerGateway contract to spend an unlimited amount of KERNEL tokens on behalf of this contract
         // in order to avoid the need to approve the contract every time an operator stakes KERNEL tokens on behalf of a
         // user
-        kernel.safeApprove(_stakerGateway, type(uint256).max);
+        kernel.forceApprove(_stakerGateway, type(uint256).max);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -126,7 +128,7 @@ contract KernelReceiver is Initializable, AccessControlUpgradeable, PausableUpgr
      * @param user The address of the user
      * @param amount The amount of KERNEL tokens to be restaked in the Kernel Protocol
      */
-    function stakeFor(address user, uint256 amount) external whenNotPaused nonReentrant onlyRole(OPERATOR_ROLE) {
+    function stakeFor(address user, uint256 amount) external nonReentrant whenNotPaused onlyRole(OPERATOR_ROLE) {
         _stakeFor(user, amount);
     }
 
@@ -140,8 +142,8 @@ contract KernelReceiver is Initializable, AccessControlUpgradeable, PausableUpgr
         uint256[] calldata amounts
     )
         external
-        whenNotPaused
         nonReentrant
+        whenNotPaused
         onlyRole(OPERATOR_ROLE)
     {
         if (users.length == 0) {
@@ -172,12 +174,12 @@ contract KernelReceiver is Initializable, AccessControlUpgradeable, PausableUpgr
         stakerGateway = IStakerGateway(_stakerGateway);
 
         // Revoke the approval of the old StakerGateway contract to spend KERNEL tokens on behalf of this contract
-        kernel.safeApprove(address(oldStakerGateway), 0);
+        kernel.forceApprove(address(oldStakerGateway), 0);
 
         // Approve the new StakerGateway contract to spend an unlimited amount of KERNEL tokens on behalf of this
         // contract in order to avoid the need to approve the contract every time an operator stakes KERNEL tokens on
         // behalf of a user
-        kernel.safeApprove(_stakerGateway, type(uint256).max);
+        kernel.forceApprove(_stakerGateway, type(uint256).max);
 
         emit StakerGatewayUpdated(_stakerGateway, address(oldStakerGateway));
     }

@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface ILidoWithdrawalQueue {
     function requestWithdrawals(
@@ -24,18 +25,16 @@ interface ILidoWithdrawalQueue {
 
     function getLastCheckpointIndex() external view returns (uint256);
 
-    function claimWithdrawalsTo(
-        uint256[] calldata _requestIds,
-        uint256[] calldata _hints,
-        address _recipient
-    )
-        external;
+    function claimWithdrawalsTo(uint256[] calldata _requestIds, uint256[] calldata _hints, address _recipient) external;
     function finalize(uint256 _lastRequestIdToBeFinalized, uint256 _maxShareRate) external payable;
 
     function getLastRequestId() external view returns (uint256);
 }
 
+/// @dev Upgradeable base contract without storage gaps; adding variables in upgrades can collide with inheritors.
 abstract contract UnstakeStETH is Initializable {
+    using SafeERC20 for IERC20;
+
     ILidoWithdrawalQueue public withdrawalQueue;
     IERC20 public stETH;
 
@@ -47,7 +46,7 @@ abstract contract UnstakeStETH is Initializable {
     }
 
     function _unstakeStEth(uint256 amountToUnstake) internal {
-        stETH.approve(address(withdrawalQueue), amountToUnstake);
+        stETH.safeIncreaseAllowance(address(withdrawalQueue), amountToUnstake);
 
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = amountToUnstake;

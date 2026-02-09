@@ -34,15 +34,15 @@ contract PubkeyRegistry is IPubkeyRegistry, LRTConfigRoleChecker, Initializable 
         emit UpdatedLRTConfig(lrtConfigAddr);
     }
 
-    function hasPubkey(bytes calldata pubkey) public view returns (bool) {
+    function hasPubkey(bytes calldata pubkey) external view returns (bool) {
         return pubkeyRegistry[keccak256(pubkey)];
     }
 
-    function addPubkey(bytes calldata pubkey) public onlyLRTNodeDelegator {
+    function addPubkey(bytes calldata pubkey) external onlyLRTNodeDelegator {
         pubkeyRegistry[keccak256(pubkey)] = true;
     }
 
-    function addPubkeys(bytes[] calldata pubkeys) public onlyLRTManager {
+    function addPubkeys(bytes[] calldata pubkeys) external onlyLRTManager {
         for (uint256 i = 0; i < pubkeys.length; i++) {
             pubkeyRegistry[keccak256(pubkeys[i])] = true;
         }

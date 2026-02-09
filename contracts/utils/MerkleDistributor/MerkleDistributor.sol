@@ -3,20 +3,19 @@ pragma solidity 0.8.27;
 
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { MerkleProofUpgradeable } from
-    "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
-
-interface IERC20 {
-    function transfer(address recipient, uint256 amount) external returns (bool);
-}
+import {
+    MerkleProofUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
+import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IMerkleDistributor {
     error ZeroValueProvided();
     error NoTokensToClaim();
     error AlreadyClaimed();
     error InvalidMerkleProof();
-    error TransferFailed();
     error InvalidIndex();
+    error InvalidFeeInBPS();
 
     /// @dev returns the address of the token distributed by this contract.
     function token() external view returns (address);
@@ -35,11 +34,18 @@ interface IMerkleDistributor {
 
     event Claimed(uint256 index, address account, uint256 amount);
     event MerkleRootSet(uint256 index, bytes32 currentMerkleRoot);
+    event ProtocolTreasuryUpdated(address protocolTreasury);
+    event TokenUpdated(address token);
+    event FeeInBPSUpdated(uint256 feeInBPS);
 }
 
 /// @title MerkleDistributor
-/// @notice Generice Merkle distributor contract. It is used to distribute tokens to users based on a merkle root.
+/// @notice Generic Merkle distributor contract. It is used to distribute tokens to users based on a merkle root.
 contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUpgradeable {
+    using SafeERC20 for IERC20;
+
+    uint256 public constant MAX_FEE_IN_BPS = 1000;
+
     address public override token;
     address public protocolTreasury;
     uint256 public feeInBPS;
@@ -62,10 +68,14 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
     }
 
     /// @dev Initializes the contract
-    function initialize(address token_, address _protocolTreasury, uint256 _feeInBPS) public initializer {
+    function initialize(address token_, address _protocolTreasury, uint256 _feeInBPS) external initializer {
         // token can be set later but not the protocol treasury
         if (_protocolTreasury == address(0)) {
             revert ZeroValueProvided();
+        }
+
+        if (_feeInBPS > MAX_FEE_IN_BPS) {
+            revert InvalidFeeInBPS();
         }
 
         __Ownable_init();
@@ -128,14 +138,10 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
         uint256 fee = (claimableAmount * feeInBPS) / 10_000;
         uint256 amountToSend = claimableAmount - fee;
 
-        if (!IERC20(token).transfer(account, amountToSend)) {
-            revert TransferFailed();
-        }
+        IERC20(token).safeTransfer(account, amountToSend);
 
         // Send the fee to the protocol treasury
-        if (!IERC20(token).transfer(protocolTreasury, fee)) {
-            revert TransferFailed();
-        }
+        IERC20(token).safeTransfer(protocolTreasury, fee);
 
         emit Claimed(index, account, claimableAmount);
     }
@@ -169,6 +175,8 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
         }
 
         protocolTreasury = _protocolTreasury;
+
+        emit ProtocolTreasuryUpdated(_protocolTreasury);
     }
 
     /// @dev Set the token address.
@@ -180,13 +188,21 @@ contract MerkleDistributor is IMerkleDistributor, OwnableUpgradeable, PausableUp
         }
 
         token = _token;
+
+        emit TokenUpdated(_token);
     }
 
     /// @dev Set the fee in BPS.
     /// @dev only called by the owner.
     /// @param _feeInBPS The fee in BPS.
     function setFeeInBPS(uint256 _feeInBPS) external onlyOwner {
+        if (_feeInBPS > MAX_FEE_IN_BPS) {
+            revert InvalidFeeInBPS();
+        }
+
         feeInBPS = _feeInBPS;
+
+        emit FeeInBPSUpdated(_feeInBPS);
     }
 
     /// @dev Pause the contract

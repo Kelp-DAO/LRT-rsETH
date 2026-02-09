@@ -20,6 +20,7 @@ library LRTConstants {
     bytes32 public constant REWARD_RECEIVER = keccak256("REWARD_RECEIVER");
     bytes32 public constant PROTOCOL_TREASURY = keccak256("PROTOCOL_TREASURY");
     bytes32 public constant PUBKEY_REGISTRY = keccak256("PUBKEY_REGISTRY");
+    bytes32 public constant UNLOCKED_WITHDRAWAL_INITIALIZER = keccak256("UNLOCKED_WITHDRAWAL_INITIALIZER");
 
     bytes32 public constant BEACON_CHAIN_ETH_STRATEGY = keccak256("BEACON_CHAIN_ETH_STRATEGY");
     bytes32 public constant EIGEN_STRATEGY_MANAGER = keccak256("EIGEN_STRATEGY_MANAGER");
@@ -34,6 +35,7 @@ library LRTConstants {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 public constant ASSET_TRANSFER_ROLE = keccak256("ASSET_TRANSFER_ROLE");
     bytes32 public constant TIME_LOCK_ROLE = keccak256("TIME_LOCK_ROLE");
 
     // constants
