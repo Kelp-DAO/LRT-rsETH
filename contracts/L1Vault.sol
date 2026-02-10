@@ -3,20 +3,24 @@ pragma solidity 0.8.27;
 
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { ILRTDepositPool } from "contracts/interfaces/ILRTDepositPool.sol";
 import { IRSETH } from "contracts/interfaces/IRSETH.sol";
 import { IRSETH_OFTAdapter, SendParam, MessagingFee } from "contracts/interfaces/IRSETH_OFTAdapter.sol";
 import { UtilLib } from "contracts/utils/UtilLib.sol";
+import { IWETH } from "contracts/external/weth/IWETH.sol";
 import { IWstETH } from "contracts/external/lido/IWstETH.sol";
 
 /**
  * @title L1Vault
  * @notice This contract is the receiver of the ETH and LST token deposits from
  * the L2 bridger. It will mint the rsETH tokens and send them to the RsETHTokenWrapper
- * on the corresponding L2 chain. There should be exactly one L1Vault for each L2 chain.
+ * on the corresponding L2 chain after bridging. There should be exactly one L1Vault for
+ * each L2 chain.
  */
 contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgradeable {
     using SafeERC20 for IERC20;
@@ -48,21 +52,42 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
     /// @notice The address of the wstETH token
     address public wstETH;
 
+    /// @notice The address of the WETH token
+    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+
     /// @notice Custom errors
     error InvalidMinRSETHAmountExpected();
     error InsufficientRsETHBalance();
     error InvalidMinAmount();
     error InvalidLzChainId();
-    error InsufficientNativeFee();
+    error EmptyDescription();
+    error IncorrectNativeFee();
     error NoWstETHBalance();
+    error NoWETHBalance();
 
     /// @notice Events
+    event ETHDepositForL1Vault(uint256 depositAmount, uint256 rsethMintAmount);
+    event AssetDepositForL1Vault(address indexed asset, uint256 depositAmount, uint256 rsethMintAmount);
     event BridgedRsETHToL2(uint32 lzChainId, address l2Receiver, uint256 amount, uint256 minAmount);
     event LRTDepositPoolSet(address lrtDepositPool);
     event RsETHSet(address rsETH);
     event OFTAdapterSet(address oftAdapter);
+    event DstLzChainIdSet(uint32 dstLzChainId);
+    event L2ReceiverSet(address l2Receiver);
+    event DescriptionSet(string description);
     event WstETHSet(address wstETH);
+    event WstETHUnwrapped(uint256 stETHAmount);
+    event WETHUnwrapped(uint256 wethAmount);
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @dev Reinitializes the L1Vault contract
+     * @param _wstETH The address of the wstETH token
+     */
     function reinitialize(address _wstETH) external reinitializer(2) onlyRole(DEFAULT_ADMIN_ROLE) {
         UtilLib.checkNonZeroAddress(_wstETH);
         wstETH = _wstETH;
@@ -70,11 +95,11 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
     }
 
     /**
-     * @dev Initialize the L1Vault contract
+     * @dev Initializes the L1Vault contract
      * @param _admin The address of the admin
      * @param _manager The address of the manager
      * @param _lrtDepositPool The address of the LRT deposit pool
-     * @param _rsETH The address of the RsETH token
+     * @param _rsETH The address of the rsETH token
      * @param _oftAdapter The address of the OFT adapter
      * @param _dstLzChainId The LayerZero ID of the corresponding L2 chain
      * @param _l2Receiver The address of the RsETHTokenWrapper on the corresponding L2 chain
@@ -131,6 +156,8 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
         }
 
         lrtDepositPool.depositETH{ value: balanceOfETH }(rsETHAmountToMint, "");
+
+        emit ETHDepositForL1Vault(balanceOfETH, rsETHAmountToMint);
     }
 
     /**
@@ -150,6 +177,8 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
         IERC20(token).safeIncreaseAllowance(address(lrtDepositPool), tokenBalance);
 
         lrtDepositPool.depositAsset(token, tokenBalance, rsETHAmountToMint, "");
+
+        emit AssetDepositForL1Vault(token, tokenBalance, rsETHAmountToMint);
     }
 
     /// @notice Unwrap wstETH to stETH to be able to mint rsETH
@@ -161,13 +190,29 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
         }
 
         // Unwrap wstETH to stETH
-        IWstETH(wstETH).unwrap(wstETHBalance);
+        uint256 stETHAmount = IWstETH(wstETH).unwrap(wstETHBalance);
+
+        emit WstETHUnwrapped(stETHAmount);
+    }
+
+    /// @notice Unwrap WETH to ETH to be able to mint rsETH
+    function unwrapWETH() external nonReentrant onlyRole(MANAGER_ROLE) {
+        uint256 wethBalance = IERC20(WETH).balanceOf(address(this));
+
+        if (wethBalance == 0) {
+            revert NoWETHBalance();
+        }
+
+        // Unwrap WETH to ETH
+        IWETH(WETH).withdraw(wethBalance);
+
+        emit WETHUnwrapped(wethBalance);
     }
 
     /**
-     * @dev Bridge RsETH to L2
-     * @param amount The amount of RsETH to bridge
-     * @param minAmount The minimum amount of RsETH to receive on L2
+     * @dev Bridge rsETH to L2
+     * @param amount The amount of rsETH to bridge
+     * @param minAmount The minimum amount of rsETH to receive on L2
      * @param nativeFee The native fee to pay for the bridge
      */
     function bridgeRsETHToL2(
@@ -188,11 +233,11 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
             revert InvalidMinAmount();
         }
 
-        if (msg.value < nativeFee) {
-            revert InsufficientNativeFee();
+        if (msg.value != nativeFee) {
+            revert IncorrectNativeFee();
         }
 
-        rsETH.approve(address(oftAdapter), amount);
+        IERC20(address(rsETH)).safeIncreaseAllowance(address(oftAdapter), amount);
 
         SendParam memory sendParam = SendParam({
             dstEid: dstLzChainId,
@@ -212,9 +257,9 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
     }
 
     /**
-     * @dev Quote the native fee for sending RsETH to L2
-     * @param amount The amount of RsETH to send
-     * @param minAmount The minimum amount of RsETH to receive on L2
+     * @dev Quote the native fee for sending rsETH to L2
+     * @param amount The amount of rsETH to send
+     * @param minAmount The minimum amount of rsETH to receive on L2
      * @return The fee to be paid in native currency
      */
     function getNativeFee(uint256 amount, uint256 minAmount) external view returns (uint256) {
@@ -256,8 +301,8 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
     }
 
     /**
-     * @dev Set the RsETH address
-     * @param _rsETH The address of the RsETH token
+     * @dev Set the rsETH address
+     * @param _rsETH The address of the rsETH token
      */
     function setRsETH(address _rsETH) external onlyRole(TIMELOCK_ROLE) {
         UtilLib.checkNonZeroAddress(_rsETH);
@@ -273,6 +318,50 @@ contract L1Vault is Initializable, ReentrancyGuardUpgradeable, AccessControlUpgr
         UtilLib.checkNonZeroAddress(_oftAdapter);
         oftAdapter = IRSETH_OFTAdapter(_oftAdapter);
         emit OFTAdapterSet(_oftAdapter);
+    }
+
+    /**
+     * @dev Sets the destination LayerZero chain ID
+     * @param _dstLzChainId The LayerZero chain ID of the corresponding L2 chain
+     */
+    function setDstLzChainId(uint32 _dstLzChainId) external onlyRole(TIMELOCK_ROLE) {
+        if (_dstLzChainId == 0) {
+            revert InvalidLzChainId();
+        }
+        dstLzChainId = _dstLzChainId;
+        emit DstLzChainIdSet(_dstLzChainId);
+    }
+
+    /**
+     * @dev Sets the L2 receiver address
+     * @param _l2Receiver The address of the RsETHTokenWrapper on the corresponding L2 chain
+     */
+    function setL2Receiver(address _l2Receiver) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_l2Receiver);
+        l2Receiver = _l2Receiver;
+        emit L2ReceiverSet(_l2Receiver);
+    }
+
+    /**
+     * @dev Sets the description of the L1Vault contract
+     * @param _description The description to identify the L1Vault for which L2 chain is used
+     */
+    function setDescription(string calldata _description) external onlyRole(TIMELOCK_ROLE) {
+        if (bytes(_description).length == 0) {
+            revert EmptyDescription();
+        }
+        description = _description;
+        emit DescriptionSet(_description);
+    }
+
+    /**
+     * @dev Sets the wstETH address
+     * @param _wstETH The address of the wstETH token
+     */
+    function setWstETH(address _wstETH) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_wstETH);
+        wstETH = _wstETH;
+        emit WstETHSet(_wstETH);
     }
 
     /// @dev Handles direct ETH transfers from the L2 bridge

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.27;
 
+import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { IL2ERC20Bridge } from "contracts/external/lido/IL2ERC20Bridge.sol";
@@ -9,9 +10,9 @@ import { UtilLib } from "contracts/utils/UtilLib.sol";
 
 /**
  * @title LidoBridge
- * @notice This contract is a wrapper for the Lido canonical bridge contract on Base
+ * @notice This contract is a wrapper for the Lido canonical bridge contract on OP stack chains
  */
-contract LidoBridge is IL2TokenBridge {
+contract LidoBridge is IL2TokenBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Address of the wstETH token
@@ -51,7 +52,7 @@ contract LidoBridge is IL2TokenBridge {
      * @param recipient The address of the recipient on L1
      * @param amount The amount of wstETH to bridge
      */
-    function bridgeTokenToL1(address recipient, uint256 amount) external payable {
+    function bridgeTokenToL1(address recipient, uint256 amount) external payable nonReentrant {
         UtilLib.checkNonZeroAddress(recipient);
 
         if (amount == 0) {

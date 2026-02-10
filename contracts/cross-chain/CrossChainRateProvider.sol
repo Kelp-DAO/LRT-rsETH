@@ -22,7 +22,7 @@ abstract contract CrossChainRateProvider is Ownable, ReentrancyGuard {
     /// @notice LayerZero endpoint address
     address public layerZeroEndpoint;
 
-    /// @notice Rate Receiver address address
+    /// @notice Rate Receiver address
     address public rateReceiver;
 
     /// @notice Information of which token and base token rate is being provided

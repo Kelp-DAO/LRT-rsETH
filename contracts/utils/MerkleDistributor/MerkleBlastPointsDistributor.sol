@@ -3,8 +3,9 @@ pragma solidity 0.8.27;
 
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { MerkleProofUpgradeable } from
-    "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
+import {
+    MerkleProofUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol";
 
 interface IBlastPoints {
     function configurePointsOperator(address operator) external;
@@ -66,7 +67,7 @@ contract MerkleBlastPointsDistributor is IMerkleBlastPointsDistributor, OwnableU
     }
 
     /// @dev Initializes the contract
-    function initialize(address _blastPointAddress, address _pointsOperator) public initializer {
+    function initialize(address _blastPointAddress, address _pointsOperator) external initializer {
         __Ownable_init();
         __Pausable_init();
 
@@ -159,9 +160,9 @@ contract MerkleBlastPointsDistributor is IMerkleBlastPointsDistributor, OwnableU
         _unpause();
     }
 
-    /// @dev set points operator on behald of contract.
+    /// @dev set points operator on behalf of contract.
     /// @dev If the caller, in this case owner,  is not the operator it will revert
-    /// @param contractAddress the contract you’d like to change the points operator for
+    /// @param contractAddress the contract to change the points operator for
     /// @param operator the address of the new points operator
     function setPointsOperatorOnBehalf(address contractAddress, address operator) external onlyOwner {
         IBlastPoints(blastPointAddress).configurePointsOperatorOnBehalf(contractAddress, operator);

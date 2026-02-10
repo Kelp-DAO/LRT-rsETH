@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IswEXIT {
     function getLastTokenIdCreated() external view returns (uint256);
@@ -12,7 +13,10 @@ interface IswEXIT {
     function processWithdrawals(uint256 lastTokenIdToProcess) external;
 }
 
+/// @dev Upgradeable base contract without storage gaps; adding variables in upgrades can collide with inheritors.
 abstract contract UnstakeSwETH is Initializable {
+    using SafeERC20 for IERC20;
+
     IswEXIT public swEXIT;
     IERC20 public swETH;
 
@@ -24,7 +28,7 @@ abstract contract UnstakeSwETH is Initializable {
     }
 
     function _unstakeSwEth(uint256 amountToUnstake) internal returns (uint256 tokenId) {
-        swETH.approve(address(swEXIT), amountToUnstake);
+        swETH.safeIncreaseAllowance(address(swEXIT), amountToUnstake);
 
         // Create withdrawal request
         swEXIT.createWithdrawRequest(amountToUnstake);

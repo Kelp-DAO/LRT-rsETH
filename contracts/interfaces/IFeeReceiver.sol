@@ -7,4 +7,5 @@ interface IFeeReceiver {
 
     // events
     event MevRewardsAddedToTVL(uint256 amount);
+    event DepositPoolSet(address _depositPool);
 }

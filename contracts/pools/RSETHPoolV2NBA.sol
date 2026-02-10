@@ -2,9 +2,12 @@
 pragma solidity 0.8.27;
 
 import {
-    ERC20Upgradeable, IERC20Upgradeable
+    ERC20Upgradeable,
+    IERC20Upgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
 import { UtilLib } from "contracts/utils/UtilLib.sol";
@@ -31,6 +34,9 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     /// @notice New variable added for pausable functionality
     bool public paused;
 
+    /// @notice The pauser role identifier
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
     modifier whenNotPaused() {
         if (paused) revert ContractPaused();
         _;
@@ -45,6 +51,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     error TransferFailed();
     error ContractPaused();
     error ContractNotPaused();
+    error InvalidFeeAmount();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
@@ -72,7 +79,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
         uint256 _feeBps,
         address _rsETHOracle
     )
-        public
+        external
         initializer
     {
         UtilLib.checkNonZeroAddress(_wrsETH);
@@ -96,7 +103,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
 
     /// @dev Swaps ETH for rsETH
     /// @param referralId The referral id
-    function deposit(string memory referralId) external payable whenNotPaused nonReentrant {
+    function deposit(string memory referralId) external payable nonReentrant whenNotPaused {
         uint256 amount = msg.value;
 
         if (amount == 0) revert InvalidAmount();
@@ -130,7 +137,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Withdraws fees earned by the pool
-    function withdrawFees(address receiver) external onlyRole(BRIDGER_ROLE) {
+    function withdrawFees(address receiver) external nonReentrant onlyRole(BRIDGER_ROLE) {
         // withdraw fees in ETH
         uint256 amountToSendInETH = feeEarnedInETH;
         feeEarnedInETH = 0;
@@ -141,7 +148,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     }
 
     /// @dev Legacy function - Withdraws assets from the contract for bridging
-    function moveAssetsForBridging() external onlyRole(BRIDGER_ROLE) {
+    function moveAssetsForBridging() external nonReentrant onlyRole(BRIDGER_ROLE) {
         // withdraw ETH - fees
         uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
 
@@ -154,7 +161,7 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
     function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (_feeBps > 10_000) revert InvalidAmount();
+        if (_feeBps > 10_000) revert InvalidFeeAmount();
         feeBps = _feeBps;
         emit FeeBpsSet(_feeBps);
     }
@@ -168,13 +175,13 @@ contract RSETHPoolV2NBA is ERC20Upgradeable, AccessControlUpgradeable, Reentranc
     }
 
     /// @dev Pauses the pausable methods in the contract
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) whenNotPaused {
         paused = true;
         emit Paused(msg.sender);
     }
 
     /// @dev Unpauses the pausable methods in the contract
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) whenPaused {
         paused = false;
         emit Unpaused(msg.sender);
     }

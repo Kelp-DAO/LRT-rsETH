@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {
-    ERC20Upgradeable, IERC20Upgradeable
+    ERC20Upgradeable,
+    IERC20Upgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import { UtilLib } from "../utils/UtilLib.sol";
+import { UtilLib } from "contracts/utils/UtilLib.sol";
 
 interface IOracle {
     function getRate() external view returns (uint256);
@@ -34,11 +37,13 @@ contract AGETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     address[] public supportedTokenList;
 
     error InvalidAmount();
+    error InvalidFeeAmount();
     error TransferFailed();
     error UnsupportedToken();
     error UnsupportedOracle();
     error AlreadySupportedToken();
     error TokenNotFoundError();
+    error TokenBalanceNotZero();
     error EthDepositDisabled();
 
     event SwapOccurred(address indexed user, uint256 agETHAmount, uint256 fee, string referralId);
@@ -75,7 +80,7 @@ contract AGETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         uint256 _feeBps,
         address _agETHOracle
     )
-        public
+        external
         initializer
     {
         UtilLib.checkNonZeroAddress(_agETH);
@@ -238,7 +243,7 @@ contract AGETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
     function setFeeBps(uint256 _feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (_feeBps > 10_000) revert InvalidAmount();
+        if (_feeBps > 10_000) revert InvalidFeeAmount();
 
         feeBps = _feeBps;
 
@@ -284,9 +289,9 @@ contract AGETHPoolV3 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     /// @param token The token address
     function removeSupportedToken(address token, uint256 tokenIndex) external onlyRole(DEFAULT_ADMIN_ROLE) {
         UtilLib.checkNonZeroAddress(token);
-        if (supportedTokenList[tokenIndex] != token) {
-            revert TokenNotFoundError();
-        }
+        if (supportedTokenList[tokenIndex] != token) revert TokenNotFoundError();
+        if (IERC20(token).balanceOf(address(this)) != 0) revert TokenBalanceNotZero();
+
         delete supportedTokenOracle[token];
         supportedTokenList[tokenIndex] = supportedTokenList[supportedTokenList.length - 1];
         supportedTokenList.pop();

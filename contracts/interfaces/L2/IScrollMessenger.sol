@@ -7,7 +7,6 @@ interface IScrollMessenger {
      * Events *
      *
      */
-
     /// @notice Emitted when a cross domain message is sent.
     /// @param sender The address of the sender who initiates the message.
     /// @param target The address of target contract to call.

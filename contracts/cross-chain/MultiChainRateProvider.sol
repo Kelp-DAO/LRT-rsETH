@@ -46,10 +46,6 @@ abstract contract MultiChainRateProvider is Ownable, ReentrancyGuard {
     /// @param newLayerZeroEndpoint the LayerZero Endpoint address that was updated
     event LayerZeroEndpointUpdated(address newLayerZeroEndpoint);
 
-    /// @notice Emitted when RateReceiver is updated
-    /// @param newRateReceiver the RateReceiver address that was updated
-    event RateReceiverUpdated(address newRateReceiver);
-
     /// @notice Emitted when a new rate receiver is added
     /// @param newChainId the chainId of the rate receiver
     /// @param newContract the address of the rate receiver
@@ -125,9 +121,8 @@ abstract contract MultiChainRateProvider is Ownable, ReentrancyGuard {
 
             bytes memory remoteAndLocalAddresses = abi.encodePacked(rateReceivers[i]._contract, address(this));
 
-            (uint256 estimatedFee,) = ILayerZeroEndpoint(layerZeroEndpoint).estimateFees(
-                dstChainId, address(this), _payload, false, bytes("")
-            );
+            (uint256 estimatedFee,) = ILayerZeroEndpoint(layerZeroEndpoint)
+                .estimateFees(dstChainId, address(this), _payload, false, bytes(""));
 
             ILayerZeroEndpoint(layerZeroEndpoint).send{ value: estimatedFee }(
                 dstChainId, remoteAndLocalAddresses, _payload, payable(msg.sender), address(0x0), bytes("")
@@ -166,9 +161,8 @@ abstract contract MultiChainRateProvider is Ownable, ReentrancyGuard {
         for (uint256 i; i < rateReceiversLength;) {
             uint16 dstChainId = uint16(rateReceivers[i]._chainId);
 
-            (uint256 estimatedFee,) = ILayerZeroEndpoint(layerZeroEndpoint).estimateFees(
-                dstChainId, address(this), _payload, false, bytes("")
-            );
+            (uint256 estimatedFee,) = ILayerZeroEndpoint(layerZeroEndpoint)
+                .estimateFees(dstChainId, address(this), _payload, false, bytes(""));
 
             totalEstimatedFee += estimatedFee;
 
@@ -178,6 +172,7 @@ abstract contract MultiChainRateProvider is Ownable, ReentrancyGuard {
         }
     }
 
+    /// @notice Returns the rate receivers
     function getRateReceivers() external view returns (RateReceiver[] memory) {
         return rateReceivers;
     }

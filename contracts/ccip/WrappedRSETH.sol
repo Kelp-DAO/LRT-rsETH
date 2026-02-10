@@ -170,7 +170,7 @@ contract WrappedRSETH is IBurnMintERC20, ERC677, IERC165, ERC20Burnable, Confirm
 
     /// @notice Revokes mint role for the given address.
     /// @dev only the owner can call this function.
-    function revokeMintRole(address minter) public onlyOwner {
+    function revokeMintRole(address minter) external onlyOwner {
         if (s_minters.remove(minter)) {
             emit MintAccessRevoked(minter);
         }
@@ -178,19 +178,19 @@ contract WrappedRSETH is IBurnMintERC20, ERC677, IERC165, ERC20Burnable, Confirm
 
     /// @notice Revokes burn role from the given address.
     /// @dev only the owner can call this function
-    function revokeBurnRole(address burner) public onlyOwner {
+    function revokeBurnRole(address burner) external onlyOwner {
         if (s_burners.remove(burner)) {
             emit BurnAccessRevoked(burner);
         }
     }
 
     /// @notice Returns all permissioned minters
-    function getMinters() public view returns (address[] memory) {
+    function getMinters() external view returns (address[] memory) {
         return s_minters.values();
     }
 
     /// @notice Returns all permissioned burners
-    function getBurners() public view returns (address[] memory) {
+    function getBurners() external view returns (address[] memory) {
         return s_burners.values();
     }
 

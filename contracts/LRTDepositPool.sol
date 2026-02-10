@@ -1,41 +1,29 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.27;
 
-import {UtilLib} from "./utils/UtilLib.sol";
-import {LRTConstants} from "./utils/LRTConstants.sol";
+import { UtilLib } from "./utils/UtilLib.sol";
+import { LRTConstants } from "./utils/LRTConstants.sol";
 
-import {
-    LRTConfigRoleChecker,
-    ILRTConfig
-} from "./utils/LRTConfigRoleChecker.sol";
-import {IRSETH} from "./interfaces/IRSETH.sol";
-import {ILRTOracle} from "./interfaces/ILRTOracle.sol";
-import {INodeDelegator} from "./interfaces/INodeDelegator.sol";
-import {ILRTDepositPool} from "./interfaces/ILRTDepositPool.sol";
-import {ILRTUnstakingVault} from "./interfaces/ILRTUnstakingVault.sol";
-import {ILRTConverter} from "./interfaces/ILRTConverter.sol";
+import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.sol";
+import { IRSETH } from "./interfaces/IRSETH.sol";
+import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
+import { INodeDelegator } from "./interfaces/INodeDelegator.sol";
+import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
+import { ILRTUnstakingVault } from "./interfaces/ILRTUnstakingVault.sol";
+import { ILRTConverter } from "./interfaces/ILRTConverter.sol";
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {
-    PausableUpgradeable
-} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import {
     ReentrancyGuardUpgradeable
 } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import {
-    SafeERC20
-} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ILido} from "./external/lido/ILido.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { ILido } from "./external/lido/ILido.sol";
 
 /// @title LRTDepositPool - Deposit Pool Contract for LSTs
 /// @notice Handles LST asset deposits
-contract LRTDepositPool is
-    ILRTDepositPool,
-    LRTConfigRoleChecker,
-    PausableUpgradeable,
-    ReentrancyGuardUpgradeable
-{
+contract LRTDepositPool is ILRTDepositPool, LRTConfigRoleChecker, PausableUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
 
     uint256 public maxNodeDelegatorLimit;
@@ -67,16 +55,16 @@ contract LRTDepositPool is
                         receive functions
     //////////////////////////////////////////////////////////////*/
 
-    receive() external payable {}
+    receive() external payable { }
 
     /// @dev receive from RewardReceiver
-    function receiveFromRewardReceiver() external payable {}
+    function receiveFromRewardReceiver() external payable { }
 
     /// @dev receive from LRTConverter
-    function receiveFromLRTConverter() external payable {}
+    function receiveFromLRTConverter() external payable { }
 
     /// @dev receive from NodeDelegator
-    function receiveFromNodeDelegator() external payable {}
+    function receiveFromNodeDelegator() external payable { }
 
     /*//////////////////////////////////////////////////////////////
                             user interactions
@@ -88,13 +76,15 @@ contract LRTDepositPool is
     function depositETH(
         uint256 minRSETHAmountExpected,
         string calldata referralId
-    ) external payable nonReentrant whenNotPaused {
+    )
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        onlySupportedAsset(LRTConstants.ETH_TOKEN)
+    {
         // checks
-        uint256 rsethAmountToMint = _beforeDeposit(
-            LRTConstants.ETH_TOKEN,
-            msg.value,
-            minRSETHAmountExpected
-        );
+        uint256 rsethAmountToMint = _beforeDeposit(LRTConstants.ETH_TOKEN, msg.value, minRSETHAmountExpected);
 
         // interactions
         _mintRsETH(rsethAmountToMint);
@@ -111,29 +101,20 @@ contract LRTDepositPool is
         uint256 depositAmount,
         uint256 minRSETHAmountExpected,
         string calldata referralId
-    ) external nonReentrant whenNotPaused onlySupportedERC20Token(asset) {
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        onlySupportedERC20Token(asset)
+    {
         // checks
-        uint256 rsethAmountToMint = _beforeDeposit(
-            asset,
-            depositAmount,
-            minRSETHAmountExpected
-        );
+        uint256 rsethAmountToMint = _beforeDeposit(asset, depositAmount, minRSETHAmountExpected);
 
         // interactions
-        IERC20(asset).safeTransferFrom(
-            msg.sender,
-            address(this),
-            depositAmount
-        );
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), depositAmount);
         _mintRsETH(rsethAmountToMint);
 
-        emit AssetDeposit(
-            msg.sender,
-            asset,
-            depositAmount,
-            rsethAmountToMint,
-            referralId
-        );
+        emit AssetDeposit(msg.sender, asset, depositAmount, rsethAmountToMint, referralId);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -151,7 +132,7 @@ contract LRTDepositPool is
         external
         payable
         nonReentrant
-        onlyLRTManager
+        onlyLRTOperator
         onlySupportedERC20Token(toAsset)
     {
         // checks
@@ -161,10 +142,7 @@ contract LRTDepositPool is
             revert ZeroAssetAmount();
         }
 
-        uint256 returnAmount = getSwapETHToAssetReturnAmount(
-            toAsset,
-            ethAmountSent
-        );
+        uint256 returnAmount = getSwapETHToAssetReturnAmount(toAsset, ethAmountSent);
 
         if (minToAssetAmount > returnAmount) {
             revert MinAssetAmountNotMet();
@@ -189,16 +167,18 @@ contract LRTDepositPool is
         address fromAsset,
         uint256 fromAssetAmount,
         uint256 minETHAmountExpected
-    ) external nonReentrant onlyLRTOperator onlySupportedERC20Token(fromAsset) {
+    )
+        external
+        nonReentrant
+        onlyLRTOperator
+        onlySupportedERC20Token(fromAsset)
+    {
         if (fromAssetAmount == 0) {
             revert ZeroAssetAmount();
         }
 
         // checks
-        uint256 returnAmount = getSwapAssetForETHReturnAmount(
-            fromAsset,
-            fromAssetAmount
-        );
+        uint256 returnAmount = getSwapAssetForETHReturnAmount(fromAsset, fromAssetAmount);
 
         if (minETHAmountExpected > returnAmount) {
             revert MinAssetAmountNotMet();
@@ -208,20 +188,16 @@ contract LRTDepositPool is
             revert NotEnoughETHToTransfer();
         }
 
-        IERC20(fromAsset).safeTransferFrom(
-            msg.sender,
-            address(this),
-            fromAssetAmount
-        );
+        IERC20(fromAsset).safeTransferFrom(msg.sender, address(this), fromAssetAmount);
 
-        (bool success, ) = payable(msg.sender).call{value: returnAmount}("");
+        (bool success,) = payable(msg.sender).call{ value: returnAmount }("");
         if (!success) revert EthTransferFailed();
 
         emit AssetSwappedForETH(fromAsset, fromAssetAmount, returnAmount);
     }
 
     /// @notice transfers asset lying in this DepositPool to node delegator contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param asset Asset address
     /// @param amount Asset amount to transfer
@@ -229,52 +205,62 @@ contract LRTDepositPool is
         uint256 ndcIndex,
         address asset,
         uint256 amount
-    ) external nonReentrant onlyLRTOperator onlySupportedERC20Token(asset) {
+    )
+        external
+        nonReentrant
+        onlyAssetTransferRole
+        onlySupportedERC20Token(asset)
+    {
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
         IERC20(asset).safeTransfer(nodeDelegator, amount);
     }
 
     /// @notice transfers ETH lying in this DepositPool to node delegator contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param ndcIndex Index of NodeDelegator contract address in nodeDelegatorQueue
     /// @param amount ETH amount to transfer
     function transferETHToNodeDelegator(
         uint256 ndcIndex,
         uint256 amount
-    ) external nonReentrant onlyLRTOperator {
+    )
+        external
+        nonReentrant
+        onlyAssetTransferRole
+        onlySupportedAsset(LRTConstants.ETH_TOKEN)
+    {
         address nodeDelegator = nodeDelegatorQueue[ndcIndex];
-        INodeDelegator(nodeDelegator).sendETHFromDepositPoolToNDC{
-            value: amount
-        }();
+        INodeDelegator(nodeDelegator).sendETHFromDepositPoolToNDC{ value: amount }();
         emit EthTransferred(nodeDelegator, amount);
     }
 
     /// @notice transfers asset lying in this DepositPool to LRTUnstakingVault contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param asset Asset address
     /// @param amount Asset amount to transfer
     function transferAssetToLRTUnstakingVault(
         address asset,
         uint256 amount
-    ) external nonReentrant onlyLRTOperator onlySupportedERC20Token(asset) {
-        address lrtUnstakingVault = lrtConfig.getContract(
-            LRTConstants.LRT_UNSTAKING_VAULT
-        );
+    )
+        external
+        nonReentrant
+        onlyAssetTransferRole
+        onlySupportedERC20Token(asset)
+    {
+        address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
         IERC20(asset).safeTransfer(lrtUnstakingVault, amount);
     }
 
     /// @notice transfers ETH lying in this DepositPool to nLRTUnstakingVault contract
-    /// @dev only callable by LRT Operator
+    /// @dev only callable by Asset Transfer Role
     /// @param amount ETH amount to transfer
-    function transferETHToLRTUnstakingVault(
-        uint256 amount
-    ) external nonReentrant onlyLRTOperator {
-        address lrtUnstakingVault = lrtConfig.getContract(
-            LRTConstants.LRT_UNSTAKING_VAULT
-        );
-        ILRTUnstakingVault(lrtUnstakingVault).receiveFromLRTDepositPool{
-            value: amount
-        }();
+    function transferETHToLRTUnstakingVault(uint256 amount)
+        external
+        nonReentrant
+        onlyAssetTransferRole
+        onlySupportedAsset(LRTConstants.ETH_TOKEN)
+    {
+        address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
+        ILRTUnstakingVault(lrtUnstakingVault).receiveFromLRTDepositPool{ value: amount }();
         emit EthTransferred(lrtUnstakingVault, amount);
     }
 
@@ -285,9 +271,7 @@ contract LRTDepositPool is
     /// @notice maximum amount that can be ignored
     /// @dev only callable by LRT admin
     /// @param maxNegligibleAmount_ Maximum amount that can be ignored
-    function setMaxNegligibleAmount(
-        uint256 maxNegligibleAmount_
-    ) external onlyLRTAdmin {
+    function setMaxNegligibleAmount(uint256 maxNegligibleAmount_) external onlyLRTAdmin {
         maxNegligibleAmount = maxNegligibleAmount_;
         emit MaxNegligibleAmountUpdated(maxNegligibleAmount_);
     }
@@ -295,9 +279,7 @@ contract LRTDepositPool is
     /// @notice update min amount to deposit
     /// @dev only callable by LRT admin
     /// @param minAmountToDeposit_ Minimum amount to deposit
-    function setMinAmountToDeposit(
-        uint256 minAmountToDeposit_
-    ) external onlyLRTAdmin {
+    function setMinAmountToDeposit(uint256 minAmountToDeposit_) external onlyLRTAdmin {
         minAmountToDeposit = minAmountToDeposit_;
         emit MinAmountToDepositUpdated(minAmountToDeposit_);
     }
@@ -305,9 +287,7 @@ contract LRTDepositPool is
     /// @notice update max node delegator count
     /// @dev only callable by LRT admin
     /// @param maxNodeDelegatorLimit_ Maximum count of node delegator
-    function updateMaxNodeDelegatorLimit(
-        uint256 maxNodeDelegatorLimit_
-    ) external onlyLRTAdmin {
+    function updateMaxNodeDelegatorLimit(uint256 maxNodeDelegatorLimit_) external onlyLRTAdmin {
         if (maxNodeDelegatorLimit_ < nodeDelegatorQueue.length) {
             revert InvalidMaximumNodeDelegatorLimit();
         }
@@ -319,20 +299,19 @@ contract LRTDepositPool is
     /// @notice add new node delegator contract addresses
     /// @dev only callable by LRT admin
     /// @param nodeDelegatorContracts Array of NodeDelegator contract addresses
-    function addNodeDelegatorContractToQueue(
-        address[] calldata nodeDelegatorContracts
-    ) external onlyLRTAdmin {
+    function addNodeDelegatorContractToQueue(address[] calldata nodeDelegatorContracts) external onlyLRTAdmin {
         uint256 length = nodeDelegatorContracts.length;
         if (nodeDelegatorQueue.length + length > maxNodeDelegatorLimit) {
             revert MaximumNodeDelegatorLimitReached();
         }
 
-        for (uint256 i; i < length; ) {
+        for (uint256 i; i < length;) {
             UtilLib.checkNonZeroAddress(nodeDelegatorContracts[i]);
 
             // check if node delegator contract is already added and add it if not
             if (isNodeDelegator[nodeDelegatorContracts[i]] == 0) {
                 nodeDelegatorQueue.push(nodeDelegatorContracts[i]);
+                emit NodeDelegatorAddedinQueue(nodeDelegatorContracts[i]);
             }
 
             isNodeDelegator[nodeDelegatorContracts[i]] = 1;
@@ -341,27 +320,24 @@ contract LRTDepositPool is
                 ++i;
             }
         }
-
-        emit NodeDelegatorAddedinQueue(nodeDelegatorContracts);
     }
 
     /// @notice remove node delegator contract address from queue
     /// @dev only callable by LRT admin
     /// @param nodeDelegatorAddress NodeDelegator contract address
-    function removeNodeDelegatorContractFromQueue(
-        address nodeDelegatorAddress
-    ) external onlyLRTAdmin {
+    function removeNodeDelegatorContractFromQueue(address nodeDelegatorAddress) external onlyLRTAdmin {
         _removeNodeDelegatorContractFromQueue(nodeDelegatorAddress);
     }
 
     /// @notice remove many node delegator contracts from queue
     /// @dev only callable by LRT admin
     /// @param nodeDelegatorContracts Array of NodeDelegator contract addresses
-    function removeManyNodeDelegatorContractsFromQueue(
-        address[] calldata nodeDelegatorContracts
-    ) external onlyLRTAdmin {
+    function removeManyNodeDelegatorContractsFromQueue(address[] calldata nodeDelegatorContracts)
+        external
+        onlyLRTAdmin
+    {
         uint256 length = nodeDelegatorContracts.length;
-        for (uint256 i; i < length; ) {
+        for (uint256 i; i < length;) {
             _removeNodeDelegatorContractFromQueue(nodeDelegatorContracts[i]);
             unchecked {
                 ++i;
@@ -374,7 +350,7 @@ contract LRTDepositPool is
         _pause();
     }
 
-    /// @dev Returns to normal state. Contract must be paused
+    /// @dev Returns to normal state. Contract must be paused.
     function unpause() external onlyLRTAdmin {
         _unpause();
     }
@@ -386,13 +362,17 @@ contract LRTDepositPool is
     /// @notice Approves the maximum amount of an asset to the LRTConverter contract
     /// @dev only supported assets can be deposited and only called by the LRT manager
     /// @param asset the asset to approve
-    function maxApproveToLRTConverter(
-        address asset
-    ) external onlySupportedERC20Token(asset) onlyLRTManager {
-        address lrtConverterAddress = lrtConfig.getContract(
-            LRTConstants.LRT_CONVERTER
-        );
+    function maxApproveToLRTConverter(address asset) external onlySupportedERC20Token(asset) onlyLRTManager {
+        address lrtConverterAddress = lrtConfig.getContract(LRTConstants.LRT_CONVERTER);
         IERC20(asset).forceApprove(lrtConverterAddress, type(uint256).max);
+    }
+
+    /// @notice Revokes the approval of an asset to the LRTConverter contract
+    /// @dev only supported assets can be deposited and only called by the LRT manager
+    /// @param asset the asset to revoke approval for
+    function revokeApproveToLRTConverter(address asset) external onlySupportedERC20Token(asset) onlyLRTManager {
+        address lrtConverterAddress = lrtConfig.getContract(LRTConstants.LRT_CONVERTER);
+        IERC20(asset).forceApprove(lrtConverterAddress, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -402,9 +382,7 @@ contract LRTDepositPool is
     /// @notice gets the total asset present in protocol
     /// @param asset Asset address
     /// @return totalAssetDeposit total asset present in protocol
-    function getTotalAssetDeposits(
-        address asset
-    ) public view override returns (uint256 totalAssetDeposit) {
+    function getTotalAssetDeposits(address asset) public view override returns (uint256 totalAssetDeposit) {
         (
             uint256 assetLyingInDepositPool,
             uint256 assetLyingInNDCs,
@@ -413,21 +391,15 @@ contract LRTDepositPool is
             uint256 assetLyingInConverter,
             uint256 assetLyingUnstakingVault
         ) = getAssetDistributionData(asset);
-        uint256 effectiveAssetWithEigenLayer = assetStakedInEigenLayer +
-            assetUnstakingFromEigenLayer;
-        return (assetLyingInDepositPool +
-            assetLyingInNDCs +
-            effectiveAssetWithEigenLayer +
-            assetLyingInConverter +
-            assetLyingUnstakingVault);
+        uint256 effectiveAssetWithEigenLayer = assetStakedInEigenLayer + assetUnstakingFromEigenLayer;
+        return (assetLyingInDepositPool + assetLyingInNDCs + effectiveAssetWithEigenLayer + assetLyingInConverter
+                + assetLyingUnstakingVault);
     }
 
     /// @notice gets the current limit of asset deposit
     /// @param asset Asset address
     /// @return currentLimit Current limit of asset deposit
-    function getAssetCurrentLimit(
-        address asset
-    ) public view override returns (uint256) {
+    function getAssetCurrentLimit(address asset) public view override returns (uint256) {
         uint256 totalAssetDeposits = getTotalAssetDeposits(asset);
         if (totalAssetDeposits > lrtConfig.depositLimitByAsset(asset)) {
             return 0;
@@ -438,12 +410,7 @@ contract LRTDepositPool is
 
     /// @dev get node delegator queue
     /// @return nodeDelegatorQueue Array of node delegator contract addresses
-    function getNodeDelegatorQueue()
-        external
-        view
-        override
-        returns (address[] memory)
-    {
+    function getNodeDelegatorQueue() external view override returns (address[] memory) {
         return nodeDelegatorQueue;
     }
 
@@ -456,9 +423,7 @@ contract LRTDepositPool is
     /// NDCs
     /// @return assetLyingInConverter asset value lying in converter
     /// @return assetLyingUnstakingVault asset amount lying in UnstakingVault
-    function getAssetDistributionData(
-        address asset
-    )
+    function getAssetDistributionData(address asset)
         public
         view
         override
@@ -477,31 +442,22 @@ contract LRTDepositPool is
         }
 
         assetLyingInDepositPool = IERC20(asset).balanceOf(address(this));
-        // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
-        assetUnstakingFromEigenLayer = ILRTUnstakingVault(
-            lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)
-        ).getAssetsUnstaking(asset);
 
         uint256 ndcsCount = nodeDelegatorQueue.length;
-        for (uint256 i; i < ndcsCount; ) {
+        for (uint256 i; i < ndcsCount;) {
             assetLyingInNDCs += IERC20(asset).balanceOf(nodeDelegatorQueue[i]);
 
-            assetStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i])
-                .getAssetBalance(asset);
-            assetUnstakingFromEigenLayer += INodeDelegator(
-                nodeDelegatorQueue[i]
-            ).getAssetUnstaking(asset);
+            assetStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getAssetBalance(asset);
+            assetUnstakingFromEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getAssetUnstaking(asset);
 
             unchecked {
                 ++i;
             }
         }
 
-        address lrtUnstakingVault = lrtConfig.getContract(
-            LRTConstants.LRT_UNSTAKING_VAULT
-        );
+        address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
 
-        assetLyingInConverter = 0; //assets in converter are accounted in there eth value => getETHDistributionData
+        assetLyingInConverter = 0; // assets in converter are accounted in their eth value => getETHDistributionData()
         assetLyingUnstakingVault = IERC20(asset).balanceOf(lrtUnstakingVault);
     }
 
@@ -524,15 +480,11 @@ contract LRTDepositPool is
         ethLyingInDepositPool = address(this).balance;
 
         uint256 ndcsCount = nodeDelegatorQueue.length;
-        ethUnstakingFromEigenLayer = ILRTUnstakingVault(
-            lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT)
-        ).getAssetsUnstaking(LRTConstants.ETH_TOKEN);
 
-        for (uint256 i; i < ndcsCount; ) {
+        for (uint256 i; i < ndcsCount;) {
             ethLyingInNDCs += nodeDelegatorQueue[i].balance;
 
-            ethStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i])
-                .getEffectivePodShares();
+            ethStakedInEigenLayer += INodeDelegator(nodeDelegatorQueue[i]).getEffectivePodShares();
             ethUnstakingFromEigenLayer += INodeDelegator(nodeDelegatorQueue[i])
                 .getAssetUnstaking(LRTConstants.ETH_TOKEN);
             unchecked {
@@ -540,16 +492,11 @@ contract LRTDepositPool is
             }
         }
 
-        address lrtUnstakingVault = lrtConfig.getContract(
-            LRTConstants.LRT_UNSTAKING_VAULT
-        );
+        address lrtUnstakingVault = lrtConfig.getContract(LRTConstants.LRT_UNSTAKING_VAULT);
         ethLyingInUnstakingVault = lrtUnstakingVault.balance;
 
-        address lrtConverter = lrtConfig.getContract(
-            LRTConstants.LRT_CONVERTER
-        );
-        ethLyingInConverter = ILRTConverter(lrtConverter)
-            .ethValueInWithdrawal();
+        address lrtConverter = lrtConfig.getContract(LRTConstants.LRT_CONVERTER);
+        ethLyingInConverter = ILRTConverter(lrtConverter).ethValueInWithdrawal();
     }
 
     /// @notice View amount of rsETH to mint for given asset amount
@@ -559,17 +506,18 @@ contract LRTDepositPool is
     function getRsETHAmountToMint(
         address asset,
         uint256 amount
-    ) public view override returns (uint256 rsethAmountToMint) {
+    )
+        public
+        view
+        override
+        returns (uint256 rsethAmountToMint)
+    {
         // setup oracle contract
-        address lrtOracleAddress = lrtConfig.getContract(
-            LRTConstants.LRT_ORACLE
-        );
+        address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
         ILRTOracle lrtOracle = ILRTOracle(lrtOracleAddress);
 
         // calculate rseth amount to mint based on asset amount and asset exchange rate
-        rsethAmountToMint =
-            (amount * lrtOracle.getAssetPrice(asset)) /
-            lrtOracle.rsETHPrice();
+        rsethAmountToMint = (amount * lrtOracle.getAssetPrice(asset)) / lrtOracle.rsETHPrice();
     }
 
     /// @notice get return amount for swapping ETH to asset that is accepted by LRTDepositPool
@@ -580,17 +528,17 @@ contract LRTDepositPool is
     function getSwapETHToAssetReturnAmount(
         address toAsset,
         uint256 ethAmountToSend
-    ) public view returns (uint256 returnAmount) {
-        address lrtOracleAddress = lrtConfig.getContract(
-            LRTConstants.LRT_ORACLE
-        );
+    )
+        public
+        view
+        returns (uint256 returnAmount)
+    {
+        address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
         ILRTOracle lrtOracle = ILRTOracle(lrtOracleAddress);
 
         uint256 ethPricePerUint = 1e18;
 
-        return
-            (ethPricePerUint * ethAmountToSend) /
-            lrtOracle.getAssetPrice(toAsset);
+        return ethPricePerUint * ethAmountToSend / lrtOracle.getAssetPrice(toAsset);
     }
 
     /// @notice get return amount for swapping asset to ETH that is accepted by LRTDepositPool
@@ -601,26 +549,23 @@ contract LRTDepositPool is
     function getSwapAssetForETHReturnAmount(
         address fromAsset,
         uint256 fromAssetAmount
-    ) public view returns (uint256 returnAmount) {
-        address lrtOracleAddress = lrtConfig.getContract(
-            LRTConstants.LRT_ORACLE
-        );
+    )
+        public
+        view
+        returns (uint256 returnAmount)
+    {
+        address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
         ILRTOracle lrtOracle = ILRTOracle(lrtOracleAddress);
 
-        return (lrtOracle.getAssetPrice(fromAsset) * fromAssetAmount) / 1e18;
+        return lrtOracle.getAssetPrice(fromAsset) * fromAssetAmount / 1e18;
     }
 
     /// @notice Stakes ETH with Lido to receive stETH
     /// @param referral Optional referral address for Lido
-    function stakeEthForStETH(
-        address referral,
-        uint256 ethAmount
-    ) external onlyLRTManager {
+    function stakeEthForStETH(address referral, uint256 ethAmount) external onlyLRTManager {
         address stETHAddress = lrtConfig.getLSTToken(LRTConstants.ST_ETH_TOKEN);
 
-        uint256 stETHShares = ILido(stETHAddress).submit{value: ethAmount}(
-            referral
-        );
+        uint256 stETHShares = ILido(stETHAddress).submit{ value: ethAmount }(referral);
 
         emit AssetStaked(stETHAddress, ethAmount, stETHShares);
     }
@@ -631,9 +576,7 @@ contract LRTDepositPool is
 
     /// @notice internal function to remove node delegator contract address from queue
     /// @param nodeDelegatorAddress NodeDelegator contract address
-    function _removeNodeDelegatorContractFromQueue(
-        address nodeDelegatorAddress
-    ) internal {
+    function _removeNodeDelegatorContractFromQueue(address nodeDelegatorAddress) internal {
         // 1. check if node delegator contract is in queue and find Index
         uint256 ndcIndex = _getNDCIndex(nodeDelegatorAddress);
 
@@ -647,20 +590,16 @@ contract LRTDepositPool is
         // 3.1 remove from isNodeDelegator mapping
         isNodeDelegator[nodeDelegatorAddress] = 0;
         // 3.2 remove from nodeDelegatorQueue
-        nodeDelegatorQueue[ndcIndex] = nodeDelegatorQueue[
-            nodeDelegatorQueue.length - 1
-        ];
+        nodeDelegatorQueue[ndcIndex] = nodeDelegatorQueue[nodeDelegatorQueue.length - 1];
         nodeDelegatorQueue.pop();
 
         emit NodeDelegatorRemovedFromQueue(nodeDelegatorAddress);
     }
 
-    function _getNDCIndex(
-        address nodeDelegatorAddress
-    ) internal view returns (uint256) {
+    function _getNDCIndex(address nodeDelegatorAddress) internal view returns (uint256) {
         uint256 length = nodeDelegatorQueue.length;
         uint256 i;
-        for (; i < length; ) {
+        for (; i < length;) {
             if (nodeDelegatorQueue[i] == nodeDelegatorAddress) {
                 return i;
             }
@@ -674,24 +613,18 @@ contract LRTDepositPool is
     }
 
     /// @dev reverts if NDC has native ETH balance in eigen layer or in itself.
-    function _checkResidueEthBalance(
-        address nodeDelegatorAddress
-    ) internal view {
+    function _checkResidueEthBalance(address nodeDelegatorAddress) internal view {
         if (
-            INodeDelegator(nodeDelegatorAddress)
-                .stakedButUnverifiedNativeETH() >
-            0 ||
-            INodeDelegator(nodeDelegatorAddress).getEffectivePodShares() != 0 ||
-            address(nodeDelegatorAddress).balance > maxNegligibleAmount
+            INodeDelegator(nodeDelegatorAddress).getEffectivePodShares() != 0
+                || address(nodeDelegatorAddress).balance > maxNegligibleAmount
+                || INodeDelegator(nodeDelegatorAddress).getAssetUnstaking(LRTConstants.ETH_TOKEN) > 0
         ) {
             revert NodeDelegatorHasETH();
         }
     }
 
     /// @dev reverts if NDC has LST balance
-    function _checkResidueLSTBalance(
-        address nodeDelegatorAddress
-    ) internal view {
+    function _checkResidueLSTBalance(address nodeDelegatorAddress) internal view {
         address[] memory supportedAssets = lrtConfig.getSupportedAssetList();
         uint256 supportedAssetsLength = supportedAssets.length;
 
@@ -702,17 +635,12 @@ contract LRTDepositPool is
                 continue;
             }
 
-            assetBalance =
-                IERC20(supportedAssets[i]).balanceOf(nodeDelegatorAddress) +
-                INodeDelegator(nodeDelegatorAddress).getAssetBalance(
-                    supportedAssets[i]
-                );
+            assetBalance = IERC20(supportedAssets[i]).balanceOf(nodeDelegatorAddress)
+                + INodeDelegator(nodeDelegatorAddress).getAssetBalance(supportedAssets[i]);
+            assetBalance += INodeDelegator(nodeDelegatorAddress).getAssetUnstaking(supportedAssets[i]);
 
             if (assetBalance > maxNegligibleAmount) {
-                revert NodeDelegatorHasAssetBalance(
-                    supportedAssets[i],
-                    assetBalance
-                );
+                revert NodeDelegatorHasAssetBalance(supportedAssets[i], assetBalance);
             }
         }
     }
@@ -721,7 +649,11 @@ contract LRTDepositPool is
         address asset,
         uint256 depositAmount,
         uint256 minRSETHAmountExpected
-    ) private view returns (uint256 rsethAmountToMint) {
+    )
+        private
+        view
+        returns (uint256 rsethAmountToMint)
+    {
         if (depositAmount == 0 || depositAmount < minAmountToDeposit) {
             revert InvalidAmountToDeposit();
         }
@@ -741,16 +673,12 @@ contract LRTDepositPool is
     /// @param asset Asset address
     /// @param amount Asset amount
     /// @return bool true if deposit amount exceeds current limit
-    function _checkIfDepositAmountExceedesCurrentLimit(
-        address asset,
-        uint256 amount
-    ) internal view returns (bool) {
+    function _checkIfDepositAmountExceedesCurrentLimit(address asset, uint256 amount) internal view returns (bool) {
         uint256 totalAssetDeposits = getTotalAssetDeposits(asset);
         if (asset == LRTConstants.ETH_TOKEN) {
             return (totalAssetDeposits > lrtConfig.depositLimitByAsset(asset));
         }
-        return (totalAssetDeposits + amount >
-            lrtConfig.depositLimitByAsset(asset));
+        return (totalAssetDeposits + amount > lrtConfig.depositLimitByAsset(asset));
     }
 
     /// @dev private function to mint rseth

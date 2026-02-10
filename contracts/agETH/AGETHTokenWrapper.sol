@@ -3,8 +3,9 @@ pragma solidity 0.8.27;
 
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ERC20PermitUpgradeable } from
-    "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
+import {
+    ERC20PermitUpgradeable
+} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import { SafeERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 
@@ -26,11 +27,11 @@ contract AGETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
 
     error TokenNotAllowed();
     error CannotDeposit();
-    error InsufficientBalance();
 
     event Deposit(address asset, address _sender, uint256 _amount);
     event Withdraw(address asset, address _sender, uint256 _amount);
     event BridgerDeposited(address asset, uint256 _amount);
+    event TokenRemoved(address asset);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -41,7 +42,7 @@ contract AGETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
     /// @param admin The address of the admin
     /// @param manager The address of the manager
     /// @param _altAgETH An alternative agETH token
-    function initialize(address admin, address manager, address _altAgETH) public initializer {
+    function initialize(address admin, address manager, address _altAgETH) external initializer {
         __ERC20_init("agETHWrapper", "agETH");
         __ERC20Permit_init("agETHWrapper");
         __AccessControl_init();
@@ -60,7 +61,7 @@ contract AGETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
         _deposit(asset, msg.sender, _amount);
     }
 
-    /// @dev Deposit altAgeTH for agETH to a user
+    /// @dev Deposit altAgETH for agETH to a user
     /// @param asset The address of the token to deposit
     /// @param _to The user to send the XERC20 to
     /// @param _amount The amount of tokens to deposit
@@ -155,6 +156,7 @@ contract AGETHTokenWrapper is Initializable, AccessControlUpgradeable, ERC20Upgr
     /// @param _asset The address of the token to remove
     function removeAllowedToken(address _asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
         allowedTokens[_asset] = false;
+        emit TokenRemoved(_asset);
     }
 
     /// @dev Mint agETH tokens on L2

@@ -10,6 +10,8 @@ interface ILRTConfig {
     error CallerNotLRTConfigAdmin();
     error CallerNotLRTConfigManager();
     error CallerNotLRTConfigOperator();
+    error CallerNotLRTConfigAssetTransferRole();
+    error CallerNotLRTConfigOperatorOrAssetTransferRole();
     error CallerNotLRTConfigAllowedRole(string role);
     error CannotUpdateStrategyAsItHasFundsNDCFunds(address ndc, uint256 amount);
     error InvalidMaxRewardAmount();
@@ -31,6 +33,7 @@ interface ILRTConfig {
     event MaxNegligibleAmountUpdated(uint256 maxNegligibleAmount);
     event UpdateFee(uint256 newFee);
     event SetEigenLayerRewardReceiver(address indexed eigenLayerRewardReceiver);
+    event PausedAll(address indexed sender);
 
     // methods
 

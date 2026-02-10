@@ -9,15 +9,18 @@ import { LRTConfigRoleChecker, ILRTConfig } from "./utils/LRTConfigRoleChecker.s
 import { ILRTDepositPool } from "./interfaces/ILRTDepositPool.sol";
 import { ILRTOracle } from "./interfaces/ILRTOracle.sol";
 import { ILRTConverter } from "./interfaces/ILRTConverter.sol";
+import { ILRTWithdrawalManager } from "./interfaces/ILRTWithdrawalManager.sol";
 
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { UnstakeStETH } from "./unstaking-adapters/UnstakeStETH.sol";
+
+/// @dev Legacy unstaking adapters for swETH are kept for upgrade compatibility
 import { UnstakeSwETH } from "./unstaking-adapters/UnstakeSwETH.sol";
 
 /// @title LRTConverter - Unstakes LSTs to ETH and swaps ETH to LSTs
@@ -33,14 +36,43 @@ contract LRTConverter is
     using SafeERC20 for IERC20;
 
     mapping(bytes32 => bool) public _legacyProcessedWithdrawalRoots;
-    mapping(address => bool) public convertableAssets;
+    mapping(address => bool) public _legacyConvertibleAssets;
     mapping(address => uint256) public _legacyConversionLimit;
 
-    //needs to be added to total assets in protocol
+    // needs to be added to total assets in protocol
     uint256 public ethValueInWithdrawal;
 
-    modifier onlyConvertableAsset(address asset) {
-        require(convertableAssets[asset], "Asset not supported");
+    mapping(address => bool) private whitelistedUsers;
+
+    uint256 public whitelistedUnstakeAllowance;
+
+    modifier onlyWhitelistedUser() {
+        if (!isUserWhitelisted(msg.sender)) {
+            revert UserNotWhitelisted();
+        }
+        _;
+    }
+
+    /// @dev Modifier to enforce unstaking limits and update counters
+    /// @param amountToUnstake Amount of stETH to unstake
+    modifier withinUnstakeLimits(uint256 amountToUnstake) {
+        if (amountToUnstake == 0) {
+            revert InvalidAmount();
+        }
+
+        uint256 availableActiveETHWithdrawals = _getActiveETHUserWithdrawals();
+
+        if (amountToUnstake > whitelistedUnstakeAllowance + availableActiveETHWithdrawals) {
+            revert UnstakeLimitExceeded();
+        }
+
+        // Consume intended withdrawal limit
+        if (whitelistedUnstakeAllowance > 0) {
+            uint256 whitelistedAmountConsumed =
+                amountToUnstake > whitelistedUnstakeAllowance ? whitelistedUnstakeAllowance : amountToUnstake;
+
+            whitelistedUnstakeAllowance -= whitelistedAmountConsumed;
+        }
         _;
     }
 
@@ -89,37 +121,8 @@ contract LRTConverter is
                         write interactions
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice swap ETH for LST asset which is accepted by LRTConverter and send to LRTDepositPool
-    /// @dev use LRTOracle to get price for asset. Only callable by LRT Operator
-    /// @param asset Asset address to swap to
-    /// @param minimumExpectedReturnAmount Minimum asset amount to swap to
-    function swapEthToAsset(
-        address asset,
-        uint256 minimumExpectedReturnAmount
-    )
-        external
-        payable
-        onlyLRTOperator
-        onlyConvertableAsset(asset)
-        returns (uint256 returnAmount)
-    {
-        ILRTDepositPool lrtDepositPool = ILRTDepositPool(lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL));
-        uint256 ethAmountSent = msg.value;
-
-        returnAmount = lrtDepositPool.getSwapETHToAssetReturnAmount(asset, ethAmountSent);
-
-        if (returnAmount < minimumExpectedReturnAmount || IERC20(asset).balanceOf(address(this)) < returnAmount) {
-            revert NotEnoughAssetToTransfer();
-        }
-        // account for limits and the asset value in contract
-        _sendEthToDepositPool(ethAmountSent);
-
-        IERC20(asset).safeTransfer(msg.sender, returnAmount);
-        emit ETHSwappedForLST(ethAmountSent, asset, returnAmount);
-    }
-
     /// @notice send asset from deposit pool to LRTConverter
-    /// @dev Only callable by LRT Operator and asset need to be approved
+    /// @dev Only callable by Asset Transfer Role and asset needs to be approved
     /// @param _asset Asset address to send
     /// @param _amount Asset amount to send
     function transferAssetFromDepositPool(
@@ -127,8 +130,8 @@ contract LRTConverter is
         uint256 _amount
     )
         external
-        onlyConvertableAsset(_asset)
-        onlyLRTOperator
+        onlySupportedERC20Token(_asset)
+        onlyAssetTransferRole
     {
         address lrtDepositPoolAddress = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
         address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
@@ -139,42 +142,107 @@ contract LRTConverter is
         IERC20(_asset).safeTransferFrom(lrtDepositPoolAddress, address(this), _amount);
     }
 
+    /// @notice send asset from LRTConverter to deposit pool
+    /// @dev Only callable by Asset Transfer Role and asset needs to be approved
+    /// @param _asset Asset address to send
+    /// @param _amount Asset amount to send
+    function transferAssetToDepositPool(
+        address _asset,
+        uint256 _amount
+    )
+        external
+        onlySupportedERC20Token(_asset)
+        onlyAssetTransferRole
+    {
+        address lrtDepositPoolAddress = lrtConfig.getContract(LRTConstants.LRT_DEPOSIT_POOL);
+        address lrtOracleAddress = lrtConfig.getContract(LRTConstants.LRT_ORACLE);
+        ILRTOracle lrtOracle = ILRTOracle(lrtOracleAddress);
+        uint256 assetValue = (_amount * lrtOracle.getAssetPrice(_asset)) / 1e18;
+
+        // Set to 0 if assetValue exceeds ethValueInWithdrawal, otherwise subtract assetValue
+        ethValueInWithdrawal = ethValueInWithdrawal > assetValue ? ethValueInWithdrawal - assetValue : 0;
+
+        IERC20(_asset).safeTransfer(lrtDepositPoolAddress, _amount);
+    }
+
     /// @notice raises a unstake request for steth on lido
-    function unstakeStEth(uint256 amountToUnstake) external onlyLRTOperator {
+    /// @param amountToUnstake Amount of stETH to unstake
+    function unstakeStEth(uint256 amountToUnstake)
+        external
+        nonReentrant
+        onlyLRTOperator
+        withinUnstakeLimits(amountToUnstake)
+    {
         _unstakeStEth(amountToUnstake);
     }
 
     /// @notice claim eth from lido for steth and sends to deposit pool
-    function claimStEth(uint256 _requestId, uint256 _hint) external onlyLRTOperator {
+    function claimStEth(uint256 _requestId, uint256 _hint) external nonReentrant onlyLRTOperator {
         _claimStEth(_requestId, _hint);
         _sendEthToDepositPool(address(this).balance);
     }
 
     /// @notice raises a unstake request for sweth on swell
-    function unstakeSwEth(uint256 amountToUnstake) external onlyLRTOperator {
+    function unstakeSwEth(uint256 amountToUnstake) external nonReentrant onlyLRTOperator {
         _unstakeSwEth(amountToUnstake);
     }
 
     /// @notice claim eth from sweth from swell for sweth and sends to deposit pool
-    function claimSwEth(uint256 _tokenId) external onlyLRTOperator {
+    function claimSwEth(uint256 _tokenId) external nonReentrant onlyLRTOperator {
         _claimSwEth(_tokenId);
         _sendEthToDepositPool(address(this).balance);
     }
 
-    /*////////////////////////////////////////////////////////////
-                        setters interactions
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Add convertable asset
-    /// @param asset Asset address
-    function addConvertableAsset(address asset) external onlyLRTManager {
-        convertableAssets[asset] = true;
+    /// @notice Add or remove a user from the whitelist
+    /// @param user User address
+    /// @param whitelisted Whether to whitelist or remove from whitelist
+    function setUserWhitelisted(address user, bool whitelisted) external onlyLRTManager {
+        whitelistedUsers[user] = whitelisted;
+        emit UserWhitelisted(user, whitelisted);
     }
 
-    /// @notice Remove convertable asset
-    /// @param asset Asset address
-    function removeConvertableAsset(address asset) external onlyLRTManager {
-        convertableAssets[asset] = false;
+    /// @notice Batch add or remove users from the whitelist
+    /// @param users Array of user addresses
+    /// @param whitelisted Whether to whitelist or remove from whitelist
+    function batchSetUserWhitelisted(address[] calldata users, bool whitelisted) external onlyLRTManager {
+        for (uint256 i = 0; i < users.length; i++) {
+            whitelistedUsers[users[i]] = whitelisted;
+            emit UserWhitelisted(users[i], whitelisted);
+        }
+    }
+
+    /// @notice Declare withdrawal intent (only whitelisted users)
+    /// @param amount Amount of stETH to declare for withdrawal
+    function declareWithdrawalIntent(uint256 amount) external nonReentrant onlyWhitelistedUser {
+        if (amount == 0) {
+            revert InvalidAmount();
+        }
+        uint256 maxWhitelistedAllowance = 1_000_000_000 ether;
+        if (whitelistedUnstakeAllowance + amount > maxWhitelistedAllowance) {
+            revert WhitelistedAllowanceExceeded();
+        }
+
+        whitelistedUnstakeAllowance = whitelistedUnstakeAllowance + amount;
+        emit WithdrawalIntentDeclared(msg.sender, amount);
+    }
+
+    /*////////////////////////////////////////////////////////////
+                        view functions
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get the current unstaking limits and usage
+    /// @return whitelistedAllowance Current whitelisted unstake allowance
+    /// @return activeETHWithdrawals Current active ETH withdrawals
+    function getUnstakeLimits() external view returns (uint256 whitelistedAllowance, uint256 activeETHWithdrawals) {
+        whitelistedAllowance = whitelistedUnstakeAllowance;
+        activeETHWithdrawals = _getActiveETHUserWithdrawals();
+    }
+
+    /// @notice Check if a user is whitelisted
+    /// @param user User address to check
+    /// @return True if user is whitelisted
+    function isUserWhitelisted(address user) public view returns (bool) {
+        return whitelistedUsers[user];
     }
 
     /*////////////////////////////////////////////////////////////
@@ -192,5 +260,12 @@ contract LRTConverter is
         // Send eth to deposit pool
         ILRTDepositPool(lrtDepositPoolAddress).receiveFromLRTConverter{ value: _amount }();
         emit EthTransferred(lrtDepositPoolAddress, _amount);
+    }
+
+    /// @dev Get active user ETH withdrawals from LRTWithdrawalManager
+    function _getActiveETHUserWithdrawals() internal view returns (uint256 activeETHWithdrawals) {
+        ILRTWithdrawalManager lrtWithdrawalManager =
+            ILRTWithdrawalManager(lrtConfig.getContract(LRTConstants.LRT_WITHDRAW_MANAGER));
+        activeETHWithdrawals = lrtWithdrawalManager.assetsCommitted(LRTConstants.ETH_TOKEN);
     }
 }

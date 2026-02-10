@@ -2,9 +2,12 @@
 pragma solidity 0.8.27;
 
 import {
-    ERC20Upgradeable, IERC20Upgradeable
+    ERC20Upgradeable,
+    IERC20Upgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
 import { UtilLib } from "contracts/utils/UtilLib.sol";
@@ -51,6 +54,9 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     /// @notice The start timestamp for the daily minting limit
     uint256 public startTimestamp;
 
+    /// @notice The pauser role identifier
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
     modifier whenNotPaused() {
         if (paused) revert ContractPaused();
         _;
@@ -96,14 +102,16 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     error MintBeforeStartTimestamp();
     error InvalidStartTimestamp();
     error DeprecatedFunction();
+    error InvalidFeeAmount();
 
     event SwapOccurred(address indexed user, uint256 rsETHAmount, uint256 fee, string referralId);
     event FeesWithdrawn(uint256 feeEarnedInETH);
-    event AssetsBridged(uint256 ethBalanceMinusFees);
+    event BridgedETHToL1ViaNativeBridge(address indexed l1Receiver, uint256 ethBalanceMinusFees);
     event FeeBpsSet(uint256 feeBps);
     event OracleSet(address oracle);
     event L1VaultETHForL2ChainSet(address l1VaultETHForL2Chain);
     event L2BridgeSet(address l2Bridge);
+    event MessengerSet(address messenger);
     event Paused(address account);
     event Unpaused(address account);
     event DailyMintLimitSet(uint256 dailyMintLimit);
@@ -120,7 +128,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         uint256 _dailyMintLimit,
         uint256 _startTimestamp
     )
-        public
+        external
         reinitializer(3)
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
@@ -146,7 +154,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         address _l1VaultETHForL2Chain,
         address _messenger
     )
-        public
+        external
         reinitializer(2)
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
@@ -172,7 +180,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         uint256 _feeBps,
         address _rsETHOracle
     )
-        public
+        external
         initializer
     {
         UtilLib.checkNonZeroAddress(_wrsETH);
@@ -196,7 +204,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
 
     /// @dev Swaps ETH for rsETH
     /// @param referralId The referral id
-    function deposit(string memory referralId) external payable whenNotPaused nonReentrant limitDailyMint(msg.value) {
+    function deposit(string memory referralId) external payable nonReentrant whenNotPaused limitDailyMint(msg.value) {
         uint256 amount = msg.value;
 
         if (amount == 0) revert InvalidAmount();
@@ -225,6 +233,14 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         rsETHAmount = amountAfterFee * 1e18 / rsETHToETHrate;
     }
 
+    /**
+     * @dev Get the ETH balance minus the fees
+     * @return The ETH balance minus the fees
+     */
+    function getETHBalanceMinusFees() public view returns (uint256) {
+        return address(this).balance - feeEarnedInETH;
+    }
+
     /// @notice Gets the current day relative to the start timestamp
     /// @return uint256 The current day relative to the start timestamp
     function getCurrentDay() public view returns (uint256) {
@@ -251,7 +267,7 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Withdraws fees earned by the pool
-    function withdrawFees(address receiver) external onlyRole(BRIDGER_ROLE) {
+    function withdrawFees(address receiver) external nonReentrant onlyRole(BRIDGER_ROLE) {
         // withdraw fees in ETH
         uint256 amountToSendInETH = feeEarnedInETH;
         feeEarnedInETH = 0;
@@ -267,21 +283,25 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
     }
 
     /// @dev Withdraws assets from the L2 to L1
-    function bridgeAssets() external onlyRole(BRIDGER_ROLE) {
+    function bridgeAssets() external nonReentrant onlyRole(BRIDGER_ROLE) {
+        UtilLib.checkNonZeroAddress(l2Bridge);
+        UtilLib.checkNonZeroAddress(messenger);
+        UtilLib.checkNonZeroAddress(l1VaultETHForL2Chain);
+
         // withdraw ETH - fees
-        uint256 ethBalanceMinusFees = address(this).balance - feeEarnedInETH;
+        uint256 ethBalanceMinusFees = getETHBalanceMinusFees();
 
         IL2Messenger(messenger).sendETHToL1ViaBridge{ value: ethBalanceMinusFees }(
             l2Bridge, l1VaultETHForL2Chain, ethBalanceMinusFees
         );
 
-        emit AssetsBridged(ethBalanceMinusFees);
+        emit BridgedETHToL1ViaNativeBridge(l1VaultETHForL2Chain, ethBalanceMinusFees);
     }
 
     /// @dev Sets the fee basis points
     /// @param _feeBps The fee basis points
     function setFeeBps(uint256 _feeBps) external onlyRole(TIMELOCK_ROLE) {
-        if (_feeBps > 10_000) revert InvalidAmount();
+        if (_feeBps > 10_000) revert InvalidFeeAmount();
         feeBps = _feeBps;
         emit FeeBpsSet(_feeBps);
     }
@@ -310,14 +330,24 @@ contract RSETHPoolV2 is ERC20Upgradeable, AccessControlUpgradeable, ReentrancyGu
         emit L2BridgeSet(_l2Bridge);
     }
 
+    /**
+     * @notice Sets the L2 messenger address
+     * @param _messenger The new L2 messenger address
+     */
+    function setMessenger(address _messenger) external onlyRole(TIMELOCK_ROLE) {
+        UtilLib.checkNonZeroAddress(_messenger);
+        messenger = _messenger;
+        emit MessengerSet(_messenger);
+    }
+
     /// @dev Pauses the pausable methods in the contract
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) whenNotPaused {
         paused = true;
         emit Paused(msg.sender);
     }
 
     /// @dev Unpauses the pausable methods in the contract
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) whenPaused {
         paused = false;
         emit Unpaused(msg.sender);
     }

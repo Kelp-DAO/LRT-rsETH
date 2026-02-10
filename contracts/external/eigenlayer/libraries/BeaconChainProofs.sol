@@ -110,10 +110,7 @@ library BeaconChainProofs {
         /// -- beaconStateRoot
         require(
             Merkle.verifyInclusionSha256({
-                proof: proof.proof,
-                root: beaconBlockRoot,
-                leaf: proof.beaconStateRoot,
-                index: STATE_ROOT_INDEX
+                proof: proof.proof, root: beaconBlockRoot, leaf: proof.beaconStateRoot, index: STATE_ROOT_INDEX
             }),
             "BeaconChainProofs.verifyStateRoot: Invalid state root merkle proof"
         );
@@ -164,10 +161,7 @@ library BeaconChainProofs {
 
         require(
             Merkle.verifyInclusionSha256({
-                proof: validatorFieldsProof,
-                root: beaconStateRoot,
-                leaf: validatorRoot,
-                index: index
+                proof: validatorFieldsProof, root: beaconStateRoot, leaf: validatorRoot, index: index
             }),
             "BeaconChainProofs.verifyValidatorFields: Invalid merkle proof"
         );
@@ -204,10 +198,7 @@ library BeaconChainProofs {
 
         require(
             Merkle.verifyInclusionSha256({
-                proof: proof.proof,
-                root: beaconBlockRoot,
-                leaf: proof.balanceContainerRoot,
-                index: index
+                proof: proof.proof, root: beaconBlockRoot, leaf: proof.balanceContainerRoot, index: index
             }),
             "BeaconChainProofs.verifyBalanceContainer: invalid balance container proof"
         );
@@ -244,10 +235,7 @@ library BeaconChainProofs {
 
         require(
             Merkle.verifyInclusionSha256({
-                proof: proof.proof,
-                root: balanceContainerRoot,
-                leaf: proof.balanceRoot,
-                index: balanceIndex
+                proof: proof.proof, root: balanceContainerRoot, leaf: proof.balanceRoot, index: balanceIndex
             }),
             "BeaconChainProofs.verifyValidatorBalance: Invalid merkle proof"
         );

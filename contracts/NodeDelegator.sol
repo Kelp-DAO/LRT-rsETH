@@ -3,7 +3,9 @@ pragma solidity 0.8.27;
 
 // openzeppelin or other standard contracts
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // external libraries, interfaces, contracts
@@ -319,13 +321,12 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         IDelegationManager.QueuedWithdrawalParams[] memory queuedWithdrawalParams =
             new IDelegationManager.QueuedWithdrawalParams[](1);
         queuedWithdrawalParams[0] = IDelegationManagerTypes.QueuedWithdrawalParams({
-            strategies: strategies,
-            depositShares: shares,
-            withdrawer: address(this)
+            strategies: strategies, depositShares: shares, withdrawer: address(this)
         });
 
         bytes32[] memory withdrawalRoots = _getDelegationManager().queueWithdrawals(queuedWithdrawalParams);
         withdrawalRoot = withdrawalRoots[0];
+        _getUnstakingVault().increaseUncompletedWithdrawalCount();
         emit WithdrawalQueued(_getNonce() - 1, address(this), withdrawalRoots);
     }
 
@@ -379,20 +380,9 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
         // Finalize withdrawal with Eigenlayer Delegation Manager
         _getDelegationManager().completeQueuedWithdrawal(withdrawal, assets, receiveAsTokens);
-        // NOTE: For legacy el withdrawal support, this can be removed after all pre slashing withdrawals are processed
-        if (withdrawal.nonce < lastNonce) {
-            for (uint256 i; i < assetCount; i++) {
-                if (lrtConfig.beaconChainETHStrategy() != address(withdrawal.strategies[i])) {
-                    _getUnstakingVault().reduceSharesUnstaking(
-                        address(withdrawal.strategies[i].underlyingToken()), withdrawal.scaledShares[i]
-                    );
-                } else {
-                    _getUnstakingVault().reduceSharesUnstaking(LRTConstants.ETH_TOKEN, withdrawal.scaledShares[i]);
-                }
-            }
-        } else {
-            _getUnstakingVault().decreaseUncompletedWithdrawalCount();
-        }
+
+        _getUnstakingVault().decreaseUncompletedWithdrawalCount();
+
         if (receiveAsTokens) {
             for (uint256 i; i < assetCount; i++) {
                 if (address(assets[i]) == LRTConstants.ETH_TOKEN) {
@@ -418,11 +408,6 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
 
         for (uint256 withdrawalIndex = 0; withdrawalIndex < queuedWithdrawals.length; withdrawalIndex++) {
             IDelegationManager.Withdrawal memory withdrawal = queuedWithdrawals[withdrawalIndex];
-
-            // Note: This can be removed after lastNonce is initilized, onlySupportedAsset should check this
-            if (withdrawal.nonce < lastNonce) {
-                continue;
-            }
 
             for (uint256 strategyIndex = 0; strategyIndex < withdrawal.strategies.length; strategyIndex++) {
                 IStrategy strategy = withdrawal.strategies[strategyIndex];
@@ -476,7 +461,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     }
 
     /// @notice Transfers an asset back to the LRT deposit pool
-    /// @dev only supported assets can be transferred and only called by the LRT manager
+    /// @dev only supported assets can be transferred and only called by Asset Transfer Role
     /// @param asset the asset to transfer
     /// @param amount the amount to transfer
     function transferBackToLRTDepositPool(
@@ -487,7 +472,7 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
         nonReentrant
         whenNotPaused
         onlySupportedAsset(asset)
-        onlyLRTOperator
+        onlyAssetTransferRole
     {
         address lrtDepositPool = lrtConfig.depositPool();
 
@@ -503,9 +488,15 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     }
 
     /// @notice Transfers ETH back to the LRT Unstaking Vault
-    /// @dev only supported assets can be transferred and only called by the LRT manager
+    /// @dev only supported assets can be transferred and only called by Asset Transfer Role
     /// @param amount the amount to transfer
-    function transferETHToLRTUnstakingVault(uint256 amount) external nonReentrant whenNotPaused onlyLRTOperator {
+    function transferETHToLRTUnstakingVault(uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+        onlyAssetTransferRole
+        onlySupportedAsset(LRTConstants.ETH_TOKEN)
+    {
         _getUnstakingVault().receiveFromNodeDelegator{ value: amount }();
         emit EthTransferred(address(_getUnstakingVault()), amount);
     }
@@ -541,11 +532,11 @@ contract NodeDelegator is INodeDelegator, LRTConfigRoleChecker, PausableUpgradea
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Triggers stopped state. Contract must not be paused.
-    function pause() external onlyLRTManager {
+    function pause() external onlyRole(LRTConstants.PAUSER_ROLE) {
         _pause();
     }
 
-    /// @dev Returns to normal state. Contract must be paused
+    /// @dev Returns to normal state. Contract must be paused.
     function unpause() external onlyLRTAdmin {
         _unpause();
     }

@@ -46,7 +46,7 @@ struct TxReceipt {
 }
 
 /// @title IStargatePoolNative interface
-/// @notice Interface for the StargatePoolNative contract, used for bridhing ETH between L1 and L2 chains
+/// @notice Interface for the StargatePoolNative contract, used for bridging ETH between L1 and L2 chains
 interface IStargatePoolNative {
     /// @notice Sends tokens to another chain
     /// @dev This function handles the cross-chain token transfer
