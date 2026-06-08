@@ -1,0 +1,569 @@
+"""
+rsETH L2 Bridge Transaction Validator
+======================================
+Production-grade validator for Kelp DAO rsETH bridge transactions on Arbitrum One.
+Implements comprehensive validation, anomaly detection, and security monitoring.
+
+Author: Security Engineering Team
+Version: 2.0.0
+"""
+
+import csv
+import hashlib
+import logging
+import re
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum, auto
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, Iterator, Generator, Any, Set
+from io import StringIO
+from contextlib import contextmanager
+from functools import lru_cache
+import json
+import sys
+import os
+from collections import defaultdict
+
+# Configure production-grade logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S%z',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bridge_validator.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class ValidationError(Exception):
+    """Base exception for validation failures."""
+    pass
+
+
+class TransactionValidationError(ValidationError):
+    """Raised when transaction validation fails."""
+    pass
+
+
+class DataIntegrityError(ValidationError):
+    """Raised when data integrity checks fail."""
+    pass
+
+
+class SecurityViolationError(ValidationError):
+    """Raised when security violations are detected."""
+    pass
+
+
+class ConfigurationError(ValidationError):
+    """Raised when configuration is invalid."""
+    pass
+
+
+class ResourceExhaustionError(ValidationError):
+    """Raised when system resources are exhausted."""
+    pass
+
+
+class TransactionType(Enum):
+    """Enumeration of supported transaction types."""
+    DEPOSIT = auto()
+    WITHDRAWAL = auto()
+    UNKNOWN = auto()
+
+
+class ValidationStatus(Enum):
+    """Validation status codes."""
+    VALID = "VALID"
+    INVALID = "INVALID"
+    SUSPICIOUS = "SUSPICIOUS"
+    PENDING = "PENDING"
+    REJECTED = "REJECTED"
+
+
+class PoisoningFlag(Enum):
+    """Security poisoning detection flags."""
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SUSPICIOUS = "SUSPICIOUS"
+
+
+class SeverityLevel(Enum):
+    """Severity levels for validation issues."""
+    CRITICAL = auto()
+    HIGH = auto()
+    MEDIUM = auto()
+    LOW = auto()
+    INFO = auto()
+
+
+@dataclass(frozen=True)
+class BridgeTransaction:
+    """
+    Immutable data class representing a bridge transaction.
+    
+    Attributes:
+        timestamp: ISO 8601 timestamp of the transaction
+        transaction_hash: Blockchain transaction hash
+        asset: Asset type (rsETH or ETH)
+        amount: Transaction amount
+        exchange_rate: Exchange rate at time of transaction
+        oracle_timestamp: Timestamp from oracle
+        deposit_timestamp: Timestamp of deposit/withdrawal
+        balance_delta: Change in balance
+        rate_delta: Change in exchange rate
+        is_anomalous: Anomaly detection flag
+        poisoning_flag: Security poisoning check result
+        validation_status: Current validation status
+        notes: Additional transaction notes
+    """
+    timestamp: datetime
+    transaction_hash: str
+    asset: str
+    amount: Decimal
+    exchange_rate: Decimal
+    oracle_timestamp: datetime
+    deposit_timestamp: datetime
+    balance_delta: Decimal
+    rate_delta: Decimal
+    is_anomalous: bool
+    poisoning_flag: PoisoningFlag
+    validation_status: ValidationStatus
+    notes: str
+
+    def __post_init__(self) -> None:
+        """Validate immutable constraints after initialization."""
+        self._validate_transaction_hash()
+        self._validate_asset()
+        self._validate_amounts()
+        self._validate_timestamps()
+
+    def _validate_transaction_hash(self) -> None:
+        """Validate transaction hash format."""
+        if not re.match(r'^0x[a-fA-F0-9]{40,}$', self.transaction_hash):
+            raise TransactionValidationError(
+                f"Invalid transaction hash format: {self.transaction_hash}"
+            )
+
+    def _validate_asset(self) -> None:
+        """Validate asset type."""
+        if self.asset not in {'rsETH', 'ETH'}:
+            raise TransactionValidationError(
+                f"Unsupported asset type: {self.asset}"
+            )
+
+    def _validate_amounts(self) -> None:
+        """Validate amount and balance delta consistency."""
+        if self.amount <= Decimal('0'):
+            raise TransactionValidationError(
+                f"Non-positive amount: {self.amount}"
+            )
+        if abs(self.balance_delta) != self.amount:
+            raise TransactionValidationError(
+                f"Balance delta {self.balance_delta} doesn't match amount {self.amount}"
+            )
+
+    def _validate_timestamps(self) -> None:
+        """Validate timestamp ordering and consistency."""
+        if self.deposit_timestamp < self.oracle_timestamp:
+            raise TransactionValidationError(
+                f"Deposit timestamp {self.deposit_timestamp} before oracle timestamp {self.oracle_timestamp}"
+            )
+
+    @property
+    def transaction_type(self) -> TransactionType:
+        """Determine transaction type based on balance delta."""
+        if self.balance_delta > 0:
+            return TransactionType.DEPOSIT
+        elif self.balance_delta < 0:
+            return TransactionType.WITHDRAWAL
+        return TransactionType.UNKNOWN
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert transaction to dictionary for serialization."""
+        return {
+            'timestamp': self.timestamp.isoformat(),
+            'transaction_hash': self.transaction_hash,
+            'asset': self.asset,
+            'amount': str(self.amount),
+            'exchange_rate': str(self.exchange_rate),
+            'oracle_timestamp': self.oracle_timestamp.isoformat(),
+            'deposit_timestamp': self.deposit_timestamp.isoformat(),
+            'balance_delta': str(self.balance_delta),
+            'rate_delta': str(self.rate_delta),
+            'is_anomalous': self.is_anomalous,
+            'poisoning_flag': self.poisoning_flag.value,
+            'validation_status': self.validation_status.value,
+            'notes': self.notes
+        }
+
+
+class TransactionParser:
+    """
+    High-performance CSV transaction parser with comprehensive validation.
+    
+    Implements streaming parsing for memory efficiency with large datasets.
+    """
+    
+    # Compiled regex patterns for performance
+    TIMESTAMP_PATTERN = re.compile(
+        r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$'
+    )
+    HASH_PATTERN = re.compile(r'^0x[a-fA-F0-9]{40,}$')
+    AMOUNT_PATTERN = re.compile(r'^-?\d+(\.\d+)?$')
+    
+    # Expected CSV columns
+    EXPECTED_COLUMNS: Set[str] = {
+        'timestamp', 'transaction_hash', 'asset', 'amount',
+        'exchange_rate', 'oracle_timestamp', 'deposit_timestamp',
+        'balance_delta', 'rate_delta', 'is_anomalous',
+        'poisoning_flag', 'validation_status', 'notes'
+    }
+    
+    # Maximum decimal precision
+    MAX_DECIMAL_PLACES = 18
+    
+    def __init__(self, max_record_size: int = 10_000_000, max_rows: int = 1_000_000) -> None:
+        """
+        Initialize parser with security limits.
+        
+        Args:
+            max_record_size: Maximum allowed CSV record size in bytes
+            max_rows: Maximum number of rows to process
+            
+        Raises:
+            ConfigurationError: If parameters are invalid
+        """
+        if max_record_size <= 0:
+            raise ConfigurationError(f"Invalid max_record_size: {max_record_size}")
+        if max_rows <= 0:
+            raise ConfigurationError(f"Invalid max_rows: {max_rows}")
+            
+        self.max_record_size = max_record_size
+        self.max_rows = max_rows
+        self._stats: Dict[str, int] = defaultdict(int)
+        self._validation_errors: List[Dict[str, Any]] = []
+    
+    def parse_stream(self, csv_data: str) -> Generator[BridgeTransaction, None, Dict[str, int]]:
+        """
+        Parse CSV data stream and yield validated transactions.
+        
+        Args:
+            csv_data: Raw CSV string data
+            
+        Yields:
+            Validated BridgeTransaction objects
+            
+        Returns:
+            Processing statistics dictionary
+            
+        Raises:
+            DataIntegrityError: If CSV structure is invalid
+            ValidationError: If transaction validation fails
+            ResourceExhaustionError: If data exceeds limits
+        """
+        if not csv_data:
+            raise DataIntegrityError("Empty CSV data provided")
+        
+        if len(csv_data) > self.max_record_size * 100:
+            raise ResourceExhaustionError(
+                f"CSV data size {len(csv_data)} exceeds maximum allowed {self.max_record_size * 100}"
+            )
+        
+        try:
+            reader = csv.DictReader(StringIO(csv_data))
+        except csv.Error as e:
+            raise DataIntegrityError(f"CSV parsing error: {e}")
+        
+        # Validate CSV structure
+        if not reader.fieldnames:
+            raise DataIntegrityError("CSV has no field names")
+        
+        field_set = set(reader.fieldnames)
+        if field_set != self.EXPECTED_COLUMNS:
+            missing = self.EXPECTED_COLUMNS - field_set
+            extra = field_set - self.EXPECTED_COLUMNS
+            error_msg = []
+            if missing:
+                error_msg.append(f"Missing columns: {missing}")
+            if extra:
+                error_msg.append(f"Extra columns: {extra}")
+            raise DataIntegrityError("; ".join(error_msg))
+        
+        row_count = 0
+        for row_num, row in enumerate(reader, start=2):  # Start at 2 for header
+            if row_count >= self.max_rows:
+                logger.warning(f"Reached maximum row limit: {self.max_rows}")
+                break
+                
+            try:
+                transaction = self._parse_row(row, row_num)
+                self._stats['parsed'] += 1
+                row_count += 1
+                yield transaction
+            except (ValidationError, ValueError, TypeError) as e:
+                self._stats['failed'] += 1
+                self._validation_errors.append({
+                    'row': row_num,
+                    'error': str(e),
+                    'severity': SeverityLevel.HIGH.name
+                })
+                logger.error(f"Row {row_num} validation failed: {e}", exc_info=True)
+                continue
+        
+        self._stats['total'] = row_count + self._stats['failed']
+        return dict(self._stats)
+    
+    def _parse_timestamp(self, value: str, field_name: str) -> datetime:
+        """
+        Parse and validate timestamp string.
+        
+        Args:
+            value: Timestamp string
+            field_name: Field name for error reporting
+            
+        Returns:
+            Parsed datetime object
+            
+        Raises:
+            TransactionValidationError: If timestamp is invalid
+        """
+        if not value or not isinstance(value, str):
+            raise TransactionValidationError(
+                f"Invalid {field_name}: must be non-empty string"
+            )
+        
+        if not self.TIMESTAMP_PATTERN.match(value):
+            raise TransactionValidationError(
+                f"Invalid {field_name} format: {value}"
+            )
+        
+        try:
+            # Parse ISO 8601 timestamp
+            if value.endswith('Z'):
+                value = value[:-1] + '+00:00'
+            return datetime.fromisoformat(value)
+        except (ValueError, TypeError) as e:
+            raise TransactionValidationError(
+                f"Failed to parse {field_name} '{value}': {e}"
+            )
+    
+    def _parse_decimal(self, value: str, field_name: str, allow_negative: bool = False) -> Decimal:
+        """
+        Parse and validate decimal value.
+        
+        Args:
+            value: Decimal string
+            field_name: Field name for error reporting
+            allow_negative: Whether negative values are allowed
+            
+        Returns:
+            Parsed Decimal object
+            
+        Raises:
+            TransactionValidationError: If decimal is invalid
+        """
+        if not value or not isinstance(value, str):
+            raise TransactionValidationError(
+                f"Invalid {field_name}: must be non-empty string"
+            )
+        
+        if not self.AMOUNT_PATTERN.match(value):
+            raise TransactionValidationError(
+                f"Invalid {field_name} format: {value}"
+            )
+        
+        try:
+            decimal_value = Decimal(value)
+        except (InvalidOperation, ValueError) as e:
+            raise TransactionValidationError(
+                f"Failed to parse {field_name} '{value}': {e}"
+            )
+        
+        # Check decimal precision
+        if abs(decimal_value.as_tuple().exponent) > self.MAX_DECIMAL_PLACES:
+            raise TransactionValidationError(
+                f"{field_name} exceeds maximum decimal places: {value}"
+            )
+        
+        if not allow_negative and decimal_value < Decimal('0'):
+            raise TransactionValidationError(
+                f"{field_name} must be non-negative: {value}"
+            )
+        
+        return decimal_value
+    
+    def _parse_poisoning_flag(self, value: str) -> PoisoningFlag:
+        """
+        Parse poisoning flag value.
+        
+        Args:
+            value: Poisoning flag string
+            
+        Returns:
+            Parsed PoisoningFlag enum
+            
+        Raises:
+            TransactionValidationError: If flag is invalid
+        """
+        try:
+            return PoisoningFlag(value.upper())
+        except (ValueError, AttributeError) as e:
+            raise TransactionValidationError(
+                f"Invalid poisoning flag: {value}"
+            )
+    
+    def _parse_validation_status(self, value: str) -> ValidationStatus:
+        """
+        Parse validation status value.
+        
+        Args:
+            value: Validation status string
+            
+        Returns:
+            Parsed ValidationStatus enum
+            
+        Raises:
+            TransactionValidationError: If status is invalid
+        """
+        try:
+            return ValidationStatus(value.upper())
+        except (ValueError, AttributeError) as e:
+            raise TransactionValidationError(
+                f"Invalid validation status: {value}"
+            )
+    
+    def _parse_bool(self, value: str, field_name: str) -> bool:
+        """
+        Parse boolean value.
+        
+        Args:
+            value: Boolean string
+            field_name: Field name for error reporting
+            
+        Returns:
+            Parsed boolean value
+            
+        Raises:
+            TransactionValidationError: If value is invalid
+        """
+        if isinstance(value, bool):
+            return value
+        
+        if isinstance(value, str):
+            value_lower = value.lower().strip()
+            if value_lower in ('true', '1', 'yes'):
+                return True
+            elif value_lower in ('false', '0', 'no'):
+                return False
+        
+        raise TransactionValidationError(
+            f"Invalid boolean value for {field_name}: {value}"
+        )
+    
+    def _parse_row(self, row: Dict[str, str], row_num: int) -> BridgeTransaction:
+        """
+        Parse and validate a single CSV row.
+        
+        Args:
+            row: Dictionary of CSV row data
+            row_num: Row number for error reporting
+            
+        Returns:
+            Validated BridgeTransaction object
+            
+        Raises:
+            TransactionValidationError: If row validation fails
+        """
+        try:
+            # Parse timestamps with timezone awareness
+            timestamp = self._parse_timestamp(row['timestamp'], 'timestamp')
+            oracle_ts = self._parse_timestamp(row['oracle_timestamp'], 'oracle_timestamp')
+            deposit_ts = self._parse_timestamp(row['deposit_timestamp'], 'deposit_timestamp')
+            
+            # Parse decimal values
+            amount = self._parse_decimal(row['amount'], 'amount')
+            exchange_rate = self._parse_decimal(row['exchange_rate'], 'exchange_rate')
+            balance_delta = self._parse_decimal(row['balance_delta'], 'balance_delta', allow_negative=True)
+            rate_delta = self._parse_decimal(row['rate_delta'], 'rate_delta', allow_negative=True)
+            
+            # Parse enums and booleans
+            poisoning_flag = self._parse_poisoning_flag(row['poisoning_flag'])
+            validation_status = self._parse_validation_status(row['validation_status'])
+            is_anomalous = self._parse_bool(row['is_anomalous'], 'is_anomalous')
+            
+            # Validate transaction hash
+            if not self.HASH_PATTERN.match(row['transaction_hash']):
+                raise TransactionValidationError(
+                    f"Invalid transaction hash format: {row['transaction_hash']}"
+                )
+            
+            # Validate asset
+            if row['asset'] not in {'rsETH', 'ETH'}:
+                raise TransactionValidationError(
+                    f"Unsupported asset type: {row['asset']}"
+                )
+            
+            # Create transaction object
+            return BridgeTransaction(
+                timestamp=timestamp,
+                transaction_hash=row['transaction_hash'],
+                asset=row['asset'],
+                amount=amount,
+                exchange_rate=exchange_rate,
+                oracle_timestamp=oracle_ts,
+                deposit_timestamp=deposit_ts,
+                balance_delta=balance_delta,
+                rate_delta=rate_delta,
+                is_anomalous=is_anomalous,
+                poisoning_flag=poisoning_flag,
+                validation_status=validation_status,
+                notes=row.get('notes', '')
+            )
+            
+        except KeyError as e:
+            raise TransactionValidationError(
+                f"Missing required field: {e}"
+            )
+        except (ValueError, TypeError) as e:
+            raise TransactionValidationError(
+                f"Row {row_num} parsing error: {e}"
+            )
+    
+    def get_validation_errors(self) -> List[Dict[str, Any]]:
+        """Get list of validation errors encountered during parsing."""
+        return list(self._validation_errors)
+    
+    def clear_validation_errors(self) -> None:
+        """Clear accumulated validation errors."""
+        self._validation_errors.clear()
+        self._stats.clear()
+
+
+class TransactionValidator:
+    """
+    Advanced transaction validator with comprehensive business logic validation.
+    
+    Implements multi-layer validation including:
+    - Exchange rate consistency checks
+    - Oracle lag detection
+    - Anomaly detection
+    - Security violation detection
+    - Balance reconciliation
+    """
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Initialize validator with configuration.
+        
+        Args:
+            config: Optional configuration dictionary
+            
+        Raises:
+            ConfigurationError: If configuration is invalid
+        """
+        self.config
