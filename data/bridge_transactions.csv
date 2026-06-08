@@ -1,0 +1,536 @@
+"""
+rsETH L2 Bridge Transaction Analyzer
+=====================================
+Production-grade module for analyzing bridge transactions with comprehensive
+error handling, type safety, logging, and security validation.
+
+Author: Kelp DAO Security Team
+Version: 2.0.0
+"""
+
+import csv
+import hashlib
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum, auto
+from io import StringIO
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union, Iterator, Any
+
+# Configure production logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S UTC',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bridge_analyzer.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class AssetType(Enum):
+    """Supported asset types for bridge transactions."""
+    RS_ETH = auto()
+    ETH = auto()
+    UNKNOWN = auto()
+
+    @classmethod
+    def from_string(cls, value: str) -> 'AssetType':
+        """Parse asset type from string with validation."""
+        try:
+            normalized = value.strip().upper()
+            mapping = {
+                'RSETH': cls.RS_ETH,
+                'RS_ETH': cls.RS_ETH,
+                'ETH': cls.ETH,
+            }
+            result = mapping.get(normalized, cls.UNKNOWN)
+            if result == cls.UNKNOWN:
+                logger.warning(f"Unknown asset type encountered: {value}")
+            return result
+        except AttributeError as e:
+            logger.error(f"Invalid input type for asset parsing: {e}")
+            return cls.UNKNOWN
+
+
+class TransactionStatus(Enum):
+    """Validation status for bridge transactions."""
+    VALID = auto()
+    INVALID_HASH = auto()
+    INVALID_AMOUNT = auto()
+    INVALID_RATE = auto()
+    INVALID_TIMESTAMP = auto()
+    DUPLICATE = auto()
+
+
+class BridgeTransactionError(Exception):
+    """Base exception for bridge transaction errors."""
+    pass
+
+
+class InvalidHashError(BridgeTransactionError):
+    """Raised when transaction hash is invalid."""
+    pass
+
+
+class InvalidAmountError(BridgeTransactionError):
+    """Raised when transaction amount is invalid."""
+    pass
+
+
+class InvalidRateError(BridgeTransactionError):
+    """Raised when exchange rate is invalid."""
+    pass
+
+
+class InvariantBreachError(BridgeTransactionError):
+    """Raised when protocol invariant is breached."""
+    pass
+
+
+class SecurityError(BridgeTransactionError):
+    """Raised when security check fails."""
+    pass
+
+
+@dataclass(frozen=True)
+class BridgeTransaction:
+    """
+    Immutable bridge transaction data structure.
+    
+    Attributes:
+        tx_hash: Transaction hash (64 hex characters)
+        block_number: Ethereum block number
+        timestamp: UTC timestamp of transaction
+        asset: Asset type (rsETH or ETH)
+        amount: Transaction amount in asset units
+        rate: Exchange rate at time of transaction
+    """
+    tx_hash: str
+    block_number: int
+    timestamp: datetime
+    asset: AssetType
+    amount: Decimal
+    rate: Decimal
+
+    def __post_init__(self) -> None:
+        """Validate transaction data after initialization."""
+        try:
+            self._validate_hash()
+            self._validate_block_number()
+            self._validate_amount()
+            self._validate_rate()
+        except BridgeTransactionError:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected validation error: {e}")
+            raise BridgeTransactionError(f"Validation failed: {e}") from e
+
+    def _validate_hash(self) -> None:
+        """Validate transaction hash format."""
+        if not isinstance(self.tx_hash, str):
+            raise InvalidHashError(f"Hash must be string, got {type(self.tx_hash)}")
+        if not re.match(r'^0x[a-fA-F0-9]{64}$', self.tx_hash):
+            raise InvalidHashError(f"Invalid transaction hash format: {self.tx_hash}")
+
+    def _validate_block_number(self) -> None:
+        """Validate block number is positive."""
+        if not isinstance(self.block_number, int):
+            raise ValueError(f"Block number must be integer, got {type(self.block_number)}")
+        if self.block_number <= 0:
+            raise ValueError(f"Invalid block number: {self.block_number}")
+
+    def _validate_amount(self) -> None:
+        """Validate amount is positive and within bounds."""
+        if not isinstance(self.amount, Decimal):
+            raise InvalidAmountError(f"Amount must be Decimal, got {type(self.amount)}")
+        if self.amount <= Decimal('0'):
+            raise InvalidAmountError(f"Invalid amount: {self.amount}")
+        if self.amount > Decimal('1000000'):
+            logger.warning(f"Unusually large amount detected: {self.amount}")
+
+    def _validate_rate(self) -> None:
+        """Validate exchange rate is positive and within reasonable bounds."""
+        if not isinstance(self.rate, Decimal):
+            raise InvalidRateError(f"Rate must be Decimal, got {type(self.rate)}")
+        if self.rate <= Decimal('0'):
+            raise InvalidRateError(f"Invalid exchange rate: {self.rate}")
+        if self.rate > Decimal('10') or self.rate < Decimal('0.1'):
+            logger.warning(f"Unusual exchange rate detected: {self.rate}")
+
+
+@dataclass
+class BridgeState:
+    """
+    Tracks bridge state and detects invariant breaches.
+    
+    Attributes:
+        rseth_balance: Current rsETH balance in bridge
+        eth_balance: Current ETH balance in bridge
+        last_rate: Last recorded exchange rate
+        rate_history: Historical rate data for analysis
+        anomaly_threshold: Threshold for rate anomaly detection
+    """
+    rseth_balance: Decimal = Decimal('0')
+    eth_balance: Decimal = Decimal('0')
+    last_rate: Optional[Decimal] = None
+    rate_history: List[Tuple[datetime, Decimal]] = field(default_factory=list)
+    anomaly_threshold: Decimal = Decimal('0.01')  # 1% threshold
+
+    def __post_init__(self) -> None:
+        """Validate initialization parameters."""
+        if not isinstance(self.anomaly_threshold, Decimal):
+            raise TypeError(f"anomaly_threshold must be Decimal, got {type(self.anomaly_threshold)}")
+        if self.anomaly_threshold <= Decimal('0') or self.anomaly_threshold >= Decimal('1'):
+            raise ValueError(f"Invalid anomaly threshold: {self.anomaly_threshold}")
+
+    def apply_transaction(self, tx: BridgeTransaction) -> None:
+        """
+        Apply transaction to bridge state with invariant checking.
+        
+        Args:
+            tx: Transaction to apply
+            
+        Raises:
+            InvariantBreachError: If invariant breach detected
+            ValueError: If transaction is invalid
+        """
+        try:
+            if tx.asset == AssetType.RS_ETH:
+                self.rseth_balance += tx.amount
+            elif tx.asset == AssetType.ETH:
+                self.eth_balance += tx.amount
+            else:
+                logger.warning(f"Skipping unknown asset type: {tx.asset}")
+
+            self._check_rate_invariant(tx)
+            self._update_rate_history(tx)
+            
+            logger.debug(f"Applied transaction {tx.tx_hash}: {tx.asset} {tx.amount}")
+            
+        except InvariantBreachError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to apply transaction {tx.tx_hash}: {e}")
+            raise ValueError(f"Transaction application failed: {e}") from e
+
+    def _check_rate_invariant(self, tx: BridgeTransaction) -> None:
+        """
+        Check exchange rate invariant for potential manipulation.
+        
+        Args:
+            tx: Transaction to check
+            
+        Raises:
+            InvariantBreachError: If rate anomaly detected
+        """
+        if self.last_rate is not None:
+            try:
+                rate_change = abs(tx.rate - self.last_rate) / self.last_rate
+                if rate_change > self.anomaly_threshold:
+                    logger.error(
+                        f"Rate anomaly detected: {rate_change:.4%} change "
+                        f"from {self.last_rate} to {tx.rate}"
+                    )
+                    raise InvariantBreachError(
+                        f"Invariant breach: Rate change {rate_change:.4%} "
+                        f"exceeds threshold {self.anomaly_threshold:.4%}"
+                    )
+            except ZeroDivisionError:
+                logger.error(f"Zero rate detected in history: {self.last_rate}")
+                raise InvariantBreachError("Zero rate in history")
+
+    def _update_rate_history(self, tx: BridgeTransaction) -> None:
+        """Update rate history with new transaction."""
+        self.rate_history.append((tx.timestamp, tx.rate))
+        self.last_rate = tx.rate
+
+    def get_net_position(self) -> Dict[str, Decimal]:
+        """Calculate net position of the bridge."""
+        try:
+            return {
+                'rseth_balance': self.rseth_balance,
+                'eth_balance': self.eth_balance,
+                'net_value': self.rseth_balance * (self.last_rate or Decimal('1'))
+            }
+        except Exception as e:
+            logger.error(f"Failed to calculate net position: {e}")
+            raise
+
+
+class TransactionParser:
+    """
+    CSV transaction parser with comprehensive validation.
+    
+    Expected CSV format:
+    tx_hash,block_number,timestamp,asset,amount,rate
+    """
+    
+    REQUIRED_COLUMNS: Set[str] = {
+        'tx_hash', 'block_number', 'timestamp', 'asset', 'amount', 'rate'
+    }
+    
+    HASH_ALGORITHM: str = 'sha256'
+    MAX_TRANSACTIONS: int = 10000
+    MAX_AMOUNT: Decimal = Decimal('1000000')
+    MIN_AMOUNT: Decimal = Decimal('0.000001')
+
+    def __init__(self, anomaly_threshold: Decimal = Decimal('0.01')):
+        """
+        Initialize parser with configuration.
+        
+        Args:
+            anomaly_threshold: Threshold for rate anomaly detection
+            
+        Raises:
+            ValueError: If threshold is invalid
+        """
+        if not isinstance(anomaly_threshold, Decimal):
+            raise TypeError(f"anomaly_threshold must be Decimal, got {type(anomaly_threshold)}")
+        if anomaly_threshold <= Decimal('0') or anomaly_threshold >= Decimal('1'):
+            raise ValueError(f"Invalid anomaly threshold: {anomaly_threshold}")
+            
+        self.anomaly_threshold = anomaly_threshold
+        self.processed_hashes: Set[str] = set()
+        self.state = BridgeState(anomaly_threshold=anomaly_threshold)
+        self.transactions: List[BridgeTransaction] = []
+        self.errors: List[Dict[str, str]] = []
+
+    def parse_csv(self, csv_data: str) -> List[BridgeTransaction]:
+        """
+        Parse CSV data into validated bridge transactions.
+        
+        Args:
+            csv_data: Raw CSV string data
+            
+        Returns:
+            List of validated BridgeTransaction objects
+            
+        Raises:
+            ValueError: If CSV format is invalid
+            SecurityError: If data integrity check fails
+        """
+        logger.info("Starting CSV parsing")
+        
+        if not csv_data or not isinstance(csv_data, str):
+            raise ValueError("CSV data must be a non-empty string")
+        
+        try:
+            reader = csv.DictReader(StringIO(csv_data))
+            self._validate_csv_headers(reader.fieldnames)
+            
+            for row_num, row in enumerate(reader, start=2):
+                try:
+                    tx = self._parse_row(row, row_num)
+                    self._validate_transaction(tx)
+                    self.transactions.append(tx)
+                    self.state.apply_transaction(tx)
+                    
+                except BridgeTransactionError as e:
+                    self.errors.append({
+                        'row': row_num,
+                        'error': str(e),
+                        'severity': 'error'
+                    })
+                    logger.error(f"Row {row_num}: {e}")
+                    
+                except Exception as e:
+                    self.errors.append({
+                        'row': row_num,
+                        'error': f"Unexpected error: {e}",
+                        'severity': 'critical'
+                    })
+                    logger.critical(f"Row {row_num}: Unexpected error: {e}")
+                    
+            if self.errors:
+                logger.warning(f"Parsing completed with {len(self.errors)} errors")
+                
+            return self.transactions
+            
+        except csv.Error as e:
+            logger.error(f"CSV parsing error: {e}")
+            raise ValueError(f"Invalid CSV format: {e}") from e
+        except Exception as e:
+            logger.critical(f"Fatal parsing error: {e}")
+            raise
+
+    def _validate_csv_headers(self, headers: Optional[List[str]]) -> None:
+        """
+        Validate CSV headers match required columns.
+        
+        Args:
+            headers: List of column headers from CSV
+            
+        Raises:
+            ValueError: If headers are missing or invalid
+        """
+        if not headers:
+            raise ValueError("CSV file has no headers")
+        
+        header_set = set(h.strip().lower() for h in headers)
+        missing = self.REQUIRED_COLUMNS - header_set
+        
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        logger.debug(f"Validated CSV headers: {headers}")
+
+    def _parse_row(self, row: Dict[str, str], row_num: int) -> BridgeTransaction:
+        """
+        Parse a single CSV row into a BridgeTransaction.
+        
+        Args:
+            row: Dictionary of row data
+            row_num: Row number for error reporting
+            
+        Returns:
+            Parsed BridgeTransaction
+            
+        Raises:
+            ValueError: If row data is invalid
+        """
+        try:
+            tx_hash = row['tx_hash'].strip()
+            if not tx_hash:
+                raise ValueError("Empty transaction hash")
+            
+            block_number = int(row['block_number'])
+            if block_number <= 0:
+                raise ValueError(f"Invalid block number: {block_number}")
+            
+            timestamp = datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00'))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            
+            asset = AssetType.from_string(row['asset'])
+            if asset == AssetType.UNKNOWN:
+                raise ValueError(f"Unknown asset type: {row['asset']}")
+            
+            amount = Decimal(row['amount']).quantize(Decimal('0.000000000000000001'), rounding=ROUND_HALF_UP)
+            if amount <= Decimal('0'):
+                raise ValueError(f"Invalid amount: {amount}")
+            
+            rate = Decimal(row['rate']).quantize(Decimal('0.000000000000000001'), rounding=ROUND_HALF_UP)
+            if rate <= Decimal('0'):
+                raise ValueError(f"Invalid rate: {rate}")
+            
+            return BridgeTransaction(
+                tx_hash=tx_hash,
+                block_number=block_number,
+                timestamp=timestamp,
+                asset=asset,
+                amount=amount,
+                rate=rate
+            )
+            
+        except KeyError as e:
+            raise ValueError(f"Missing column: {e}") from e
+        except ValueError as e:
+            raise ValueError(f"Invalid data in row {row_num}: {e}") from e
+        except InvalidOperation as e:
+            raise ValueError(f"Invalid decimal value in row {row_num}: {e}") from e
+
+    def _validate_transaction(self, tx: BridgeTransaction) -> None:
+        """
+        Validate transaction for duplicates and security checks.
+        
+        Args:
+            tx: Transaction to validate
+            
+        Raises:
+            SecurityError: If duplicate or security issue detected
+        """
+        if tx.tx_hash in self.processed_hashes:
+            raise SecurityError(f"Duplicate transaction hash: {tx.tx_hash}")
+        
+        self.processed_hashes.add(tx.tx_hash)
+        
+        if len(self.processed_hashes) > self.MAX_TRANSACTIONS:
+            raise SecurityError(f"Exceeded maximum transaction limit: {self.MAX_TRANSACTIONS}")
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Get parsing statistics.
+        
+        Returns:
+            Dictionary with parsing statistics
+        """
+        return {
+            'total_transactions': len(self.transactions),
+            'total_errors': len(self.errors),
+            'unique_hashes': len(self.processed_hashes),
+            'bridge_state': {
+                'rseth_balance': str(self.state.rseth_balance),
+                'eth_balance': str(self.state.eth_balance),
+                'last_rate': str(self.state.last_rate) if self.state.last_rate else None
+            }
+        }
+
+    def export_errors(self, filepath: Union[str, Path]) -> None:
+        """
+        Export parsing errors to CSV file.
+        
+        Args:
+            filepath: Path to output file
+            
+        Raises:
+            IOError: If file cannot be written
+        """
+        if not self.errors:
+            logger.info("No errors to export")
+            return
+            
+        try:
+            path = Path(filepath)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['row', 'error', 'severity'])
+                writer.writeheader()
+                writer.writerows(self.errors)
+                
+            logger.info(f"Exported {len(self.errors)} errors to {path}")
+            
+        except IOError as e:
+            logger.error(f"Failed to export errors: {e}")
+            raise
+
+
+def verify_data_integrity(data: str, expected_hash: str) -> bool:
+    """
+    Verify data integrity using SHA-256 hash.
+    
+    Args:
+        data: Data to verify
+        expected_hash: Expected SHA-256 hash
+        
+    Returns:
+        True if hash matches, False otherwise
+    """
+    try:
+        actual_hash = hashlib.sha256(data.encode('utf-8')).hexdigest()
+        is_valid = actual_hash == expected_hash.lower()
+        
+        if not is_valid:
+            logger.warning(f"Data integrity check failed: hash mismatch")
+            
+        return is_valid
+        
+    except Exception as e:
+        logger.error(f"Integrity verification failed: {e}")
+        return False
+
+
+def main() -> None:
+    """Main entry point for bridge transaction analysis."""
+    logger.info("Starting bridge transaction analysis")
+    
+    try:
+        # Example CSV data
+        csv_data = """tx_hash,block_number,timestamp,asset,amount,rate
+0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef,100000,2024-01-01T00:00:00Z,RS_
