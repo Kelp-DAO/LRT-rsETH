@@ -1,0 +1,515 @@
+"""
+Oracle Rate Monitor for Kelp DAO rsETH Bridge
+Production-grade implementation with comprehensive error handling, logging, and validation.
+"""
+
+import csv
+import logging
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Tuple, Union, Generator
+
+# Configure logging with proper levels and formatting
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('oracle_monitor.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class OracleRateError(Exception):
+    """Base exception for oracle rate processing errors."""
+    pass
+
+
+class DataValidationError(OracleRateError):
+    """Raised when data validation fails."""
+    pass
+
+
+class RateCalculationError(OracleRateError):
+    """Raised when rate calculations produce invalid results."""
+    pass
+
+
+class ConfigurationError(OracleRateError):
+    """Raised when configuration is invalid."""
+    pass
+
+
+@dataclass(frozen=True)
+class OracleUpdate:
+    """
+    Immutable data class representing a single oracle rate update.
+    
+    Attributes:
+        update_id: Unique identifier for the oracle update
+        timestamp: UTC timestamp of the update
+        rseth_rate: Exchange rate for rsETH (8 decimal precision)
+        eth_rate: Exchange rate for ETH (8 decimal precision)
+    """
+    update_id: str
+    timestamp: datetime
+    rseth_rate: Decimal
+    eth_rate: Decimal
+    
+    def __post_init__(self) -> None:
+        """Validate data after initialization."""
+        if not self.update_id or not self.update_id.strip():
+            raise DataValidationError(f"Invalid update_id: {self.update_id}")
+        if not isinstance(self.timestamp, datetime):
+            raise DataValidationError(f"Invalid timestamp type: {type(self.timestamp)}")
+        if self.rseth_rate <= Decimal('0'):
+            raise DataValidationError(f"Non-positive rsETH rate: {self.rseth_rate}")
+        if self.eth_rate <= Decimal('0'):
+            raise DataValidationError(f"Non-positive ETH rate: {self.eth_rate}")
+    
+    @property
+    def rate_ratio(self) -> Decimal:
+        """Calculate the rsETH/ETH exchange rate ratio."""
+        try:
+            return (self.rseth_rate / self.eth_rate).quantize(
+                Decimal('0.00000001'), rounding=ROUND_HALF_UP
+            )
+        except (InvalidOperation, ZeroDivisionError) as e:
+            raise RateCalculationError(f"Failed to calculate rate ratio: {e}")
+
+
+class OracleRateParser:
+    """
+    Parser for oracle rate CSV data with comprehensive validation.
+    
+    Expected CSV format:
+    update_id,timestamp,rsETH_rate,ETH_rate
+    """
+    
+    REQUIRED_COLUMNS: List[str] = ['update_id', 'timestamp', 'rsETH_rate', 'ETH_rate']
+    PRECISION: int = 8
+    MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100MB max file size
+    
+    @staticmethod
+    def parse_timestamp(timestamp_str: str) -> datetime:
+        """
+        Parse ISO 8601 timestamp string to datetime object.
+        
+        Args:
+            timestamp_str: ISO 8601 formatted timestamp
+            
+        Returns:
+            Parsed datetime object with UTC timezone
+            
+        Raises:
+            DataValidationError: If timestamp format is invalid
+        """
+        try:
+            # Handle both 'Z' suffix and explicit timezone
+            if timestamp_str.endswith('Z'):
+                timestamp_str = timestamp_str[:-1] + '+00:00'
+            return datetime.fromisoformat(timestamp_str).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError) as e:
+            raise DataValidationError(f"Invalid timestamp format '{timestamp_str}': {e}")
+    
+    @staticmethod
+    def parse_decimal(value: str, field_name: str) -> Decimal:
+        """
+        Parse string to Decimal with validation.
+        
+        Args:
+            value: String representation of decimal number
+            field_name: Name of the field for error messages
+            
+        Returns:
+            Parsed Decimal value
+            
+        Raises:
+            DataValidationError: If value cannot be parsed as Decimal
+        """
+        try:
+            decimal_value = Decimal(value.strip())
+            if decimal_value <= Decimal('0'):
+                raise DataValidationError(f"{field_name} must be positive: {value}")
+            return decimal_value
+        except (InvalidOperation, ValueError) as e:
+            raise DataValidationError(f"Invalid {field_name} value '{value}': {e}")
+    
+    @classmethod
+    def parse_row(cls, row: Dict[str, str], row_number: int) -> OracleUpdate:
+        """
+        Parse a single CSV row into an OracleUpdate object.
+        
+        Args:
+            row: Dictionary representing a CSV row
+            row_number: Line number in the CSV file (for error reporting)
+            
+        Returns:
+            Validated OracleUpdate object
+            
+        Raises:
+            DataValidationError: If row data is invalid
+        """
+        try:
+            # Validate all required columns exist
+            for col in cls.REQUIRED_COLUMNS:
+                if col not in row:
+                    raise DataValidationError(f"Missing required column '{col}' at row {row_number}")
+            
+            # Parse and validate each field
+            update_id = row['update_id'].strip()
+            if not update_id:
+                raise DataValidationError(f"Empty update_id at row {row_number}")
+            
+            timestamp = cls.parse_timestamp(row['timestamp'])
+            rseth_rate = cls.parse_decimal(row['rsETH_rate'], 'rsETH_rate')
+            eth_rate = cls.parse_decimal(row['ETH_rate'], 'ETH_rate')
+            
+            return OracleUpdate(
+                update_id=update_id,
+                timestamp=timestamp,
+                rseth_rate=rseth_rate,
+                eth_rate=eth_rate
+            )
+        except (KeyError, ValueError) as e:
+            raise DataValidationError(f"Failed to parse row {row_number}: {e}")
+    
+    @classmethod
+    def parse_file(cls, file_path: Union[str, Path]) -> Generator[OracleUpdate, None, None]:
+        """
+        Parse an entire CSV file of oracle updates.
+        
+        Args:
+            file_path: Path to the CSV file
+            
+        Yields:
+            Validated OracleUpdate objects
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            DataValidationError: If file format is invalid
+            ConfigurationError: If file exceeds size limits
+        """
+        file_path = Path(file_path)
+        
+        if not file_path.exists():
+            raise FileNotFoundError(f"Oracle rate file not found: {file_path}")
+        if not file_path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+        
+        # Check file size
+        file_size = file_path.stat().st_size
+        if file_size > cls.MAX_FILE_SIZE:
+            raise ConfigurationError(
+                f"File size {file_size} exceeds maximum allowed size {cls.MAX_FILE_SIZE}"
+            )
+        
+        logger.info(f"Parsing oracle rate file: {file_path} (size: {file_size} bytes)")
+        
+        try:
+            with file_path.open('r', newline='', encoding='utf-8-sig') as csvfile:
+                reader = csv.DictReader(csvfile)
+                
+                # Validate header
+                if not reader.fieldnames:
+                    raise DataValidationError("CSV file has no header row")
+                
+                missing_cols = set(cls.REQUIRED_COLUMNS) - set(reader.fieldnames)
+                if missing_cols:
+                    raise DataValidationError(
+                        f"Missing required columns: {missing_cols}"
+                    )
+                
+                for row_number, row in enumerate(reader, start=2):  # Start at 2 for header
+                    try:
+                        yield cls.parse_row(row, row_number)
+                    except DataValidationError as e:
+                        logger.error(f"Row {row_number} validation failed: {e}")
+                        raise
+                        
+        except csv.Error as e:
+            raise DataValidationError(f"CSV parsing error: {e}")
+
+
+class OracleRateAnalyzer:
+    """
+    Analyzer for oracle rate updates with anomaly detection and statistics.
+    """
+    
+    def __init__(self, max_deviation_threshold: float = 0.05) -> None:
+        """
+        Initialize the analyzer with configuration.
+        
+        Args:
+            max_deviation_threshold: Maximum allowed deviation for anomaly detection (default 5%)
+        """
+        if not 0 < max_deviation_threshold < 1:
+            raise ConfigurationError(f"Invalid deviation threshold: {max_deviation_threshold}")
+        
+        self.max_deviation_threshold: float = max_deviation_threshold
+        self.updates: List[OracleUpdate] = []
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
+    def add_update(self, update: OracleUpdate) -> None:
+        """
+        Add an oracle update to the analyzer.
+        
+        Args:
+            update: OracleUpdate object to add
+            
+        Raises:
+            DataValidationError: If update is invalid
+        """
+        if not isinstance(update, OracleUpdate):
+            raise DataValidationError(f"Expected OracleUpdate, got {type(update)}")
+        
+        self.updates.append(update)
+        self.logger.debug(f"Added update {update.update_id} at {update.timestamp}")
+    
+    def calculate_statistics(self) -> Dict[str, Optional[Decimal]]:
+        """
+        Calculate statistics for all stored updates.
+        
+        Returns:
+            Dictionary containing mean, median, min, max, and std deviation of rate ratios
+            
+        Raises:
+            RateCalculationError: If no updates available or calculation fails
+        """
+        if not self.updates:
+            raise RateCalculationError("No updates available for statistics calculation")
+        
+        try:
+            ratios = [update.rate_ratio for update in self.updates]
+            
+            # Calculate statistics
+            sorted_ratios = sorted(ratios)
+            n = len(sorted_ratios)
+            
+            mean = sum(ratios) / Decimal(str(n))
+            
+            if n % 2 == 0:
+                median = (sorted_ratios[n//2 - 1] + sorted_ratios[n//2]) / Decimal('2')
+            else:
+                median = sorted_ratios[n//2]
+            
+            # Calculate standard deviation
+            variance = sum((r - mean) ** 2 for r in ratios) / Decimal(str(n))
+            std_dev = variance.sqrt()
+            
+            return {
+                'mean': mean.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),
+                'median': median.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),
+                'min': sorted_ratios[0].quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),
+                'max': sorted_ratios[-1].quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),
+                'std_dev': std_dev.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),
+                'count': Decimal(str(n))
+            }
+        except (InvalidOperation, ZeroDivisionError, IndexError) as e:
+            raise RateCalculationError(f"Failed to calculate statistics: {e}")
+    
+    def detect_anomalies(self) -> List[Tuple[OracleUpdate, Decimal]]:
+        """
+        Detect anomalous rate updates based on deviation threshold.
+        
+        Returns:
+            List of tuples containing anomalous updates and their deviation from mean
+            
+        Raises:
+            RateCalculationError: If no updates available
+        """
+        if not self.updates:
+            raise RateCalculationError("No updates available for anomaly detection")
+        
+        try:
+            stats = self.calculate_statistics()
+            mean = stats['mean']
+            
+            if mean is None:
+                raise RateCalculationError("Mean calculation returned None")
+            
+            anomalies: List[Tuple[OracleUpdate, Decimal]] = []
+            
+            for update in self.updates:
+                deviation = abs(update.rate_ratio - mean) / mean
+                if deviation > Decimal(str(self.max_deviation_threshold)):
+                    anomalies.append((update, deviation))
+                    self.logger.warning(
+                        f"Anomaly detected: {update.update_id} at {update.timestamp}, "
+                        f"deviation: {deviation:.2%}"
+                    )
+            
+            return anomalies
+            
+        except (InvalidOperation, ZeroDivisionError) as e:
+            raise RateCalculationError(f"Failed to detect anomalies: {e}")
+    
+    def clear(self) -> None:
+        """Clear all stored updates."""
+        self.updates.clear()
+        self.logger.debug("Cleared all stored updates")
+
+
+class OracleRateMonitor:
+    """
+    Main monitoring class that orchestrates parsing and analysis.
+    """
+    
+    def __init__(self, config: Optional[Dict[str, object]] = None) -> None:
+        """
+        Initialize the monitor with optional configuration.
+        
+        Args:
+            config: Optional configuration dictionary with keys:
+                - max_deviation_threshold: float (default 0.05)
+                - log_level: str (default 'INFO')
+        """
+        self.config: Dict[str, object] = config or {}
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        
+        # Set log level from config
+        log_level = self.config.get('log_level', 'INFO')
+        if isinstance(log_level, str):
+            self.logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+        
+        # Initialize analyzer with config
+        max_deviation = float(self.config.get('max_deviation_threshold', 0.05))
+        self.analyzer = OracleRateAnalyzer(max_deviation_threshold=max_deviation)
+    
+    def process_file(self, file_path: Union[str, Path]) -> Dict[str, object]:
+        """
+        Process an oracle rate file and return analysis results.
+        
+        Args:
+            file_path: Path to the CSV file
+            
+        Returns:
+            Dictionary containing:
+                - total_updates: int
+                - statistics: Dict[str, Optional[Decimal]]
+                - anomalies: List[Tuple[OracleUpdate, Decimal]]
+                - status: str ('success' or 'error')
+                - error_message: Optional[str]
+        """
+        result: Dict[str, object] = {
+            'total_updates': 0,
+            'statistics': {},
+            'anomalies': [],
+            'status': 'success',
+            'error_message': None
+        }
+        
+        try:
+            # Clear previous data
+            self.analyzer.clear()
+            
+            # Parse file and add updates
+            for update in OracleRateParser.parse_file(file_path):
+                self.analyzer.add_update(update)
+            
+            result['total_updates'] = len(self.analyzer.updates)
+            
+            # Calculate statistics
+            if self.analyzer.updates:
+                result['statistics'] = self.analyzer.calculate_statistics()
+                result['anomalies'] = self.analyzer.detect_anomalies()
+            
+            self.logger.info(
+                f"Processed {result['total_updates']} updates with "
+                f"{len(result['anomalies'])} anomalies detected"
+            )
+            
+        except (FileNotFoundError, DataValidationError, RateCalculationError, 
+                ConfigurationError, csv.Error) as e:
+            result['status'] = 'error'
+            result['error_message'] = str(e)
+            self.logger.error(f"Failed to process file: {e}")
+        
+        return result
+    
+    def validate_rate_consistency(self, updates: List[OracleUpdate]) -> bool:
+        """
+        Validate that rate updates are consistent and sequential.
+        
+        Args:
+            updates: List of OracleUpdate objects to validate
+            
+        Returns:
+            True if all updates are consistent, False otherwise
+            
+        Raises:
+            DataValidationError: If input is invalid
+        """
+        if not updates:
+            raise DataValidationError("Empty updates list")
+        
+        try:
+            for i in range(1, len(updates)):
+                current = updates[i]
+                previous = updates[i - 1]
+                
+                # Check timestamp ordering
+                if current.timestamp <= previous.timestamp:
+                    self.logger.warning(
+                        f"Non-sequential timestamps: {previous.update_id} at "
+                        f"{previous.timestamp} -> {current.update_id} at {current.timestamp}"
+                    )
+                    return False
+                
+                # Check for extreme rate changes
+                ratio_change = abs(current.rate_ratio - previous.rate_ratio) / previous.rate_ratio
+                if ratio_change > Decimal('0.1'):  # 10% max change
+                    self.logger.warning(
+                        f"Extreme rate change detected: {ratio_change:.2%} "
+                        f"between {previous.update_id} and {current.update_id}"
+                    )
+                    return False
+            
+            return True
+            
+        except (InvalidOperation, ZeroDivisionError) as e:
+            raise RateCalculationError(f"Failed to validate rate consistency: {e}")
+
+
+def main() -> None:
+    """Main entry point for the oracle rate monitor."""
+    try:
+        # Example configuration
+        config: Dict[str, object] = {
+            'max_deviation_threshold': 0.05,
+            'log_level': 'INFO'
+        }
+        
+        # Initialize monitor
+        monitor = OracleRateMonitor(config)
+        
+        # Process file (example path)
+        file_path = Path('oracle_rates.csv')
+        
+        if file_path.exists():
+            result = monitor.process_file(file_path)
+            
+            if result['status'] == 'success':
+                logger.info(f"Successfully processed {result['total_updates']} updates")
+                logger.info(f"Statistics: {result['statistics']}")
+                
+                if result['anomalies']:
+                    logger.warning(f"Found {len(result['anomalies'])} anomalies")
+                    for update, deviation in result['anomalies']:
+                        logger.warning(f"  {update.update_id}: deviation {deviation:.2%}")
+            else:
+                logger.error(f"Processing failed: {result['error_message']}")
+        else:
+            logger.info("No oracle rate file found for processing")
+            
+    except Exception as e:
+        logger.critical(f"Unexpected error in main: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
